@@ -15,7 +15,7 @@ class GMM_CPU:
         # All variances to a fixed value: 400
         self.vars = np.full(shape=(self.height, self.width, self.n_comps), fill_value=400, dtype=np.float32)
         
-        # Weight of the first component for each pixel is 1.0, other is 0.0
+        # Weight of the first component of each pixel is 1.0, the others are 0.0
         self.weights = np.zeros(shape=(self.height, self.width, self.n_comps), dtype=np.float32)
         self.weights[:, :, 0] = 1.0
 
