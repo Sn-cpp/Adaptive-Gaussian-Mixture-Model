@@ -98,6 +98,7 @@ class GMM_CPU:
         # Pixel is background if it matches any selected background component
         background_mask = np.any(sorted_matches & background_components, axis=2)
 
+        return background_mask.astype(np.uint8) * 255
         # Foreground mask
         foreground_mask = ~background_mask
 
