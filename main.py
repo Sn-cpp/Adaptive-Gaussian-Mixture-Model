@@ -29,12 +29,12 @@ while running:
         running = False
         continue
 
-    mask, time_cost = cpu_timer(model.step, frame)
+    mask, time_cost = cpu_timer(model.step, frame, 2.5, 0.7, 0.25)
 
 
     frame = cv2.putText(frame, str(int(1/time_cost)), (5, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2)
 
-    cv2.imshow("Facecam", frame)
+    # cv2.imshow("Facecam", frame)
 
     cv2.imshow("Mask", mask)
 
