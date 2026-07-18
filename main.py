@@ -4,10 +4,11 @@ import cupy as cp
 
 from utils.timer import cpu_timer, gpu_timer
 
-from gmm.cpu.GMM_cpu import GMM_CPU
+from gmm import GMM_CPU, GMM_CPU_NUMBA
 
-cam = cv2.VideoCapture(0)
-cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+cam = cv2.VideoCapture('output_sequence.mp4')
+# cam = cv2.VideoCapture(0)
+# cam.set(cv2.CAP_PROP_BUFFERSIZE, 9)
 
 CAM_WIDTH = cam.get(cv2.CAP_PROP_FRAME_WIDTH)
 CAM_HEIGHT = cam.get(cv2.CAP_PROP_FRAME_HEIGHT)
@@ -19,8 +20,12 @@ while True:
     if flag:
         break
 
-model = GMM_CPU(first_frame, n_components=5)
+model = GMM_CPU_NUMBA(first_frame, n_components=7, parallel=True)
 
+kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+kernel_fill = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
 
 while running:
     flag, frame = cam.read()
@@ -29,14 +34,26 @@ while running:
         running = False
         continue
 
-    mask, time_cost = cpu_timer(model.step, frame, 2.5, 0.7, 0.25)
+    blurred_frame = cv2.GaussianBlur(frame, (15, 15), 0)
 
+    mask, time_cost = cpu_timer(model.step, frame, match_threshold=3.5, background_threshold=0.7, update_alpha=0.001)
 
-    frame = cv2.putText(frame, str(int(1/time_cost)), (5, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2)
+    cleaned_mask = cv2.medianBlur(mask, 5)
+
+    # frame = cv2.putText(frame, str(int(1/time_cost)), (5, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2)
 
     # cv2.imshow("Facecam", frame)
 
-    cv2.imshow("Mask", mask)
+    cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
+    cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+    cleaned_mask = cv2.dilate(cleaned_mask, kernel_dilate, iterations=1)
+
+    foreground = cv2.bitwise_and(frame, frame, mask=cleaned_mask)
+
+    result = cv2.copyTo(frame, foreground, blurred_frame)
+
+    cv2.imshow("Mask", cleaned_mask)
+    cv2.imshow("Result", result)
 
     key = cv2.waitKey(1)
     if key == ord('q') or key == 27:

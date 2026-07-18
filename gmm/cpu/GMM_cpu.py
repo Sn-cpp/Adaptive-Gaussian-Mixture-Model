@@ -1,5 +1,6 @@
 import numpy as np
 
+from settings import INIT_VAR, REINIT_WEIGHT
 from utils.timer import cpu_timer
 
 class GMM_CPU:
@@ -13,7 +14,7 @@ class GMM_CPU:
         self.means[:, :, 0, :] = first_frame
 
         # All variances to a fixed value: 400
-        self.vars = np.full(shape=(self.height, self.width, self.n_comps), fill_value=400, dtype=np.float32)
+        self.vars = np.full(shape=(self.height, self.width, self.n_comps), fill_value=INIT_VAR, dtype=np.float32)
         
         # Weight of the first component of each pixel is 1.0, the others are 0.0
         self.weights = np.zeros(shape=(self.height, self.width, self.n_comps), dtype=np.float32)
@@ -61,10 +62,10 @@ class GMM_CPU:
             self.means[rows, cols, weakest_comp] = frame[rows, cols]
 
             # Re-init variance
-            self.vars[rows, cols, weakest_comp] = 400.0
+            self.vars[rows, cols, weakest_comp] = INIT_VAR
 
             # Re-init weight
-            self.weights[rows, cols, weakest_comp] = 0.01
+            self.weights[rows, cols, weakest_comp] = REINIT_WEIGHT
 
         # Normalize weights
         self.weights /= self.weights.sum(axis=2, keepdims=True) 
@@ -102,6 +103,8 @@ class GMM_CPU:
 
         return foreground_mask
 
+    def post_mask_process(self, mask: np.ndarray):
+        pass
 
     def step(self, frame: np.ndarray, match_threshold: float=2.5, background_threshold: float=0.7, update_alpha: float=0.01):
         self.update(frame, match_threshold, update_alpha)
