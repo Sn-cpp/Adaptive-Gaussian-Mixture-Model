@@ -22,39 +22,37 @@ while True:
 
 model = GMM_CPU(first_frame, n_components=5)
 
+num_frames = 5
+avg_update = None
+avg_predict = None
 
-while running:
+for i in range(num_frames):
     flag, frame = cam.read()
 
     if not flag:
-        running = False
-        continue
+        break
 
     mask, update_cost, predict_cost = model.step_profiler(frame)
+    update_df = pd.DataFrame.from_dict(update_cost, orient='index', columns=['Time (ms)'])
+    predict_df = pd.DataFrame.from_dict(predict_cost, orient='index', columns=['Time (ms)'])
 
+    if i == 0:
+        avg_update = update_df
+        avg_predict = predict_df
+        continue
 
-    # frame = cv2.putText(frame, str(int(1/time_cost)), (5, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2)
+    avg_update = avg_update + update_df
+    avg_predict = avg_predict + predict_df
 
-    # cv2.imshow("Facecam", frame)
+print("Prediction: ")
+avg_predict['Time (ms)'] *= (1000 / num_frames)
+avg_predict['Time (ms)'].round(3)
+print(avg_predict)
 
-    cv2.imshow("Mask", mask)
-
-    key = cv2.waitKey(1)
-    if key == ord('q') or key == 27:
-        running = False
-
-    break
-
-update_df = pd.DataFrame.from_dict(update_cost, orient='index', columns=['Time (ms)'])
-update_df['Time (ms)'] *= 1000
-update_df['Time (ms)'].round(3)
-print(update_df)
-
-
-predict_df = pd.DataFrame.from_dict(predict_cost, orient='index', columns=['Time (ms)'])
-predict_df['Time (ms)'] *= 1000
-predict_df['Time (ms)'].round(3)
-print(predict_df)
+print("\nUpdating")
+avg_update['Time (ms)'] *= (1000 / num_frames)
+avg_update['Time (ms)'].round(3)
+print(avg_update)
 
 # print("Update phase:")
 # for k, v in update_cost.items():

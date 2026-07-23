@@ -4,7 +4,7 @@ from settings import INIT_VAR, REINIT_WEIGHT
 from utils.timer import cpu_timer
 
 class GMM_CPU:
-    def __init__(self, first_frame: np.ndarray, n_components: int=1):        
+    def __init__(self, first_frame: np.ndarray, n_components: int, *arg, **kwargs):        
         self.height, self.width, _ = first_frame.shape
         
         self.n_comps = n_components
@@ -20,12 +20,7 @@ class GMM_CPU:
         self.weights = np.zeros(shape=(self.height, self.width, self.n_comps), dtype=np.float32)
         self.weights[:, :, 0] = 1.0
 
-
-    def update(self, frame: np.ndarray, match_threshold: float=2.5, update_alpha: float=0.01):
-        
-        # Compute error between pixel and each component's mean on 3 channels (R, G, B)
-        diff = frame[:, :, None, :] - self.means
-        diff_square_sum = np.sum(diff**2, axis=-1) # Square each channel error and sum all together
+    def update(self, frame: np.ndarray, diff_square_sum: np.ndarray, match_threshold: float=2.5, update_alpha: float=0.01):
         
         valid_diff = diff_square_sum < (match_threshold**2)*self.vars # Use threshold to filter components with large error
         matched_pixels = np.any(valid_diff, axis=2)
@@ -71,10 +66,9 @@ class GMM_CPU:
         self.weights /= self.weights.sum(axis=2, keepdims=True) 
 
     def predict(self, frame: np.ndarray, match_threshold: float = 2.5, background_threshold: float = 0.7):
-        
-        # Distance to all components
+        # Compute error between pixel and each component's mean on 3 channels (R, G, B)
         diff = frame[:, :, None, :] - self.means
-        diff_square_sum = np.sum(diff ** 2, axis=-1)
+        diff_square_sum = np.sum(diff**2, axis=-1) # Square each channel error and sum all together
 
         # Sort components by w / sigma
         rank = self.weights / (np.sqrt(self.vars) + 1e-6)
@@ -101,30 +95,21 @@ class GMM_CPU:
         # Foreground mask
         foreground_mask = (~background_mask).astype(np.uint8) * 255
 
-        return foreground_mask
-
-    def post_mask_process(self, mask: np.ndarray):
-        pass
-
-    def step(self, frame: np.ndarray, match_threshold: float=2.5, background_threshold: float=0.7, update_alpha: float=0.01):
-        self.update(frame, match_threshold, update_alpha)
-        return self.predict(frame, match_threshold, background_threshold)
+        return foreground_mask, diff_square_sum
 
     def step_profiler(self, frame: np.ndarray, match_threshold: float=2.5, background_threshold: float=0.7, update_alpha: float=0.01):
-        update_profile = self.update_profiler(frame, match_threshold, update_alpha)
-        
-        mask, predict_profile = self.predict_profiler(frame, match_threshold, background_threshold)
+        time_dict = dict()
+
+        mask, diff_square_sum, predict_profile = self.predict_profiler(frame, match_threshold, background_threshold)
+
+        update_profile = self.update_profiler(frame, diff_square_sum, match_threshold, update_alpha)
 
         return mask, update_profile, predict_profile
     
-    def update_profiler(self, frame: np.ndarray, match_threshold: float=2.5, update_alpha: float=0.01):
+    def update_profiler(self, frame: np.ndarray, diff_square_sum: np.ndarray, match_threshold: float=2.5, update_alpha: float=0.01):
         
         time_dict = dict()
-
-        # Compute error between pixel and each component's mean on 3 channels (R, G, B)
-        diff, time_dict['diff'] =  cpu_timer(lambda: frame[:, :, None, :] - self.means)
-        diff_square_sum, time_dict['diff_square_sum'] = cpu_timer(lambda: np.sum(diff**2, axis=-1)) # Square each channel error and sum all together
-        
+   
         valid_diff, time_dict['valid_diff'] = cpu_timer(lambda: diff_square_sum < (match_threshold**2)*self.vars) # Use threshold to filter components with large error
         matched_pixels, time_dict['matched_pixels'] = cpu_timer(lambda: np.any(valid_diff, axis=2))
 
@@ -176,14 +161,13 @@ class GMM_CPU:
 
         return time_dict
 
-
     def predict_profiler(self, frame: np.ndarray, match_threshold: float = 2.5, background_threshold: float = 0.7):
         time_dict = dict()
 
+        # Compute error between pixel and each component's mean on 3 channels (R, G, B)
+        diff, time_dict['diff'] =  cpu_timer(lambda: frame[:, :, None, :] - self.means)
+        diff_square_sum, time_dict['diff_square_sum'] = cpu_timer(lambda: np.sum(diff**2, axis=-1)) # Square each channel error and sum all together
 
-        # Distance to all components
-        diff, time_dict['diff'] = cpu_timer(lambda: frame[:, :, None, :] - self.means)
-        diff_square_sum, time_dict['diff_square_sum'] = cpu_timer(lambda: np.sum(diff ** 2, axis=-1))
 
         # Sort components by w / sigma
         rank, time_dict['rank'] = cpu_timer(lambda: self.weights / (np.sqrt(self.vars) + 1e-6))
@@ -210,4 +194,4 @@ class GMM_CPU:
         # Foreground mask
         foreground_mask, time_dict['foreground_mask'] = cpu_timer(lambda: (~background_mask).astype(np.uint8) * 255)
 
-        return foreground_mask, time_dict
+        return foreground_mask, diff_square_sum, time_dict
