@@ -1,4 +1,5 @@
-INIT_VAR = 200.0
-REINIT_WEIGHT = 0.01
+import numpy as np
+INIT_VAR = np.float32(200.0)
+REINIT_WEIGHT = np.float32(0.01)
 
 

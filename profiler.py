@@ -32,7 +32,8 @@ for i in range(num_frames):
     if not flag:
         break
 
-    mask, update_cost, predict_cost = model.step_profiler(frame)
+    frame_planar = frame.transpose(2, 0, 1)
+    mask, update_cost, predict_cost = model.step_profiler(frame_planar)
     update_df = pd.DataFrame.from_dict(update_cost, orient='index', columns=['Time (ms)'])
     predict_df = pd.DataFrame.from_dict(predict_cost, orient='index', columns=['Time (ms)'])
 

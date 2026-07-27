@@ -3,7 +3,7 @@ import cupy as cp
 
 def cpu_timer(func, *args, **kwargs):
     """
-    Wrapper function for measuring execution time of a function on CPU ONLY
+    Wrapper function for measuring execution time in seconds(s) of a function on CPU ONLY
 
     Parameter:
         + `func`: To-be-measured function
@@ -18,7 +18,7 @@ def cpu_timer(func, *args, **kwargs):
 
 def gpu_timer(func, *args, **kwargs):
     """
-    Wrapper function for measuring execution time of a function on GPU via CuPy
+    Wrapper function for measuring execution time in seconds(s) of a function on GPU via CuPy
 
     Parameter:
         + `func`: To-be-measured function
@@ -33,7 +33,7 @@ def gpu_timer(func, *args, **kwargs):
     end.record()
     end.synchronize() 
 
-    return ret, cp.cuda.get_elapsed_time(start, end)
+    return ret, cp.cuda.get_elapsed_time(start, end) / 1000.0
 
 
 
