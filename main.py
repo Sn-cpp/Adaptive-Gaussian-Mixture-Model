@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import cupy as cp
 
-from utils import cpu_timer, gpu_timer, cp_gpu_warmup, mask_refiner, background_subtractor
+from utils import *
 
 from gmm import *
 
@@ -40,7 +40,7 @@ model_list = [
 ]
 
 # Model selection
-model_choice = 0
+model_choice = 3
 
 # Parameters config
 gaussian_components = 7
@@ -81,6 +81,8 @@ def gpu_step(model, frame: np.ndarray):
     total_time = to_dvc_cost + (predict_cost + update_cost) + to_host_cost
     return mask, total_time
 
+model_fps_graph = FPS_Graph(400, 400)
+
 
 # --------------------------------------------------------------------------------------
 base_func = cpu_step
@@ -98,20 +100,22 @@ while running:
         running = False
         continue
 
-
     # Convert the frame to planar mode (C, H, W) with C=3 (BGR)
     planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
 
     mask, time_cost = step_func(model, planar_frame)
+    model_fps = int(1/time_cost)
+    model_fps_graph.write_value(model_fps)
     # mask_base, time_cost_base = base_func(model_base, planar_frame)
 
     refined_mask = mask_refiner(mask)
     result = background_subtractor(frame, refined_mask)
-    result = cv2.putText(result, str(int(1/time_cost)), (5, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2)
+    # result = cv2.putText(result, str(int(1/time_cost)), (5, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2)
 
 
     cv2.imshow("Mask", mask)
     cv2.imshow("Result", result)
+    model_fps_graph.display("Numba FPS", model_fps)
 
     key = cv2.waitKey(1)
     if key == ord('q') or key == 27:
