@@ -34,13 +34,14 @@ class Monitor:
         self.graph[:, -1] = 255
 
         # Map FPS value to y-coordinate
-        y0 = int((1.0 - last_value / self.max_value) * (self.height - 1))
-        y1 = int((1.0 - value / self.max_value ) * (self.height - 1))
+        y0 = int((1.0 - min(last_value, self.max_value) / self.max_value) * (self.height - 1))
+        y1 = int((1.0 - min(value, self.max_value) / self.max_value ) * (self.height - 1))
 
 
         # Draw the line connecting two last values
         cv2.line(self.graph, (self.width - 2, y0), (self.width - 1, y1), color, 1)
 
+        return value
 
     def display(self, dynamic_desc: str="", org: tuple=None):
         scene = self.graph.copy()
