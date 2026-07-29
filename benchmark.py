@@ -95,11 +95,16 @@ if __name__ == "__main__":
     else:
         step_func = cpu_step
 
+    # Execution time
+    cpu_fps_last = 0
+    model_fps_last = 0
+    fps_graph = Monitor(800, 400, 360, np.arange(30, 360, 30), "FPS", f"Green-CPU base | Red-{model_list[model_choice][0]}", (5, 15))
+
     # IOU metric
     iou_mog2_last = 0
     iou_cpu_last = 0
     iou_model_last = 0
-    iou_graph = Monitor(400, 400, 1.0, np.round(np.arange(0.1, 1.0, 0.1), 2), "IOU", "Blue-MOG2 | Green-CPU base | Red-User model", (5, 15))
+    iou_graph = Monitor(400, 400, 1.0, np.round(np.arange(0.1, 1.0, 0.1), 2), "IOU", f"Blue-MOG2 | Green-CPU base | Red-{model_list[model_choice][0]}", (5, 15))
 
     # Masks-difference in Mean Absolute Error (MAE)
     mask_mae_last = 0
@@ -130,9 +135,9 @@ if __name__ == "__main__":
         # Predict mask
         mask_mog2 = cv2_gmm.apply(frame)
 
-        mask_cpu, _ = cpu_step(base_model, planar_frame, match_threshold, update_alpha, weight_threshold)
+        mask_cpu, cpu_cost = cpu_step(base_model, planar_frame, match_threshold, update_alpha, weight_threshold)
 
-        mask_model, _ = step_func(model, planar_frame, match_threshold, update_alpha, weight_threshold)
+        mask_model, model_cost = step_func(model, planar_frame, match_threshold, update_alpha, weight_threshold)
 
         # Post-process masks
         refined_mask_mog2 = mask_refiner(mask_mog2)
@@ -156,6 +161,16 @@ if __name__ == "__main__":
         cv2.putText(mask_grid, f"{model_list[model_choice][0]}", (CAM_WIDTH + 8, 50 + CAM_HEIGHT), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
 
         cv2.imshow("Groundtruth and Models' masks", mask_grid)
+
+        # Write FPS values
+        fps_cpu = int(1 / cpu_cost)
+        fps_model = int(1 / model_cost)
+        fps_graph.write_value(fps_cpu, cpu_fps_last, (0, 255, 0))
+        fps_graph.write_value(fps_model, model_fps_last, (0, 0, 255))
+        fps_graph.display(f"CPU: {fps_cpu} | {model_list[model_choice][0]}: {fps_model}", (5, 30))
+        cpu_fps_last = fps_cpu
+        model_fps_last = fps_model
+
 
         # Compute IOU for each models
         iou_mog2 = compute_iou(refined_mask_mog2, ground)
