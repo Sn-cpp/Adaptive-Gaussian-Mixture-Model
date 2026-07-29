@@ -7,17 +7,17 @@ class GMM_CPU:
     def __init__(self, first_frame: np.ndarray, n_components: int, *arg, **kwargs):        
         self.height, self.width, _ = first_frame.shape
         
-        self.n_comps = n_components
+        self.k_comps = n_components
 
         # First component mean with the first frame
-        self.means = np.ones(shape=(self.n_comps, 3, self.height, self.width), dtype=np.float32)
+        self.means = np.ones(shape=(self.k_comps, 3, self.height, self.width), dtype=np.float32)
         self.means[0, :, :, :] = first_frame.transpose(2, 0, 1)
     
         # All variances to a fixed value
-        self.vars = np.full(shape=(self.n_comps, self.height, self.width), fill_value=INIT_VAR, dtype=np.float32)
+        self.vars = np.full(shape=(self.k_comps, self.height, self.width), fill_value=INIT_VAR, dtype=np.float32)
         
         # Weight of the first component of each pixel is 1.0, the others are 0.0
-        self.weights = np.zeros(shape=(self.n_comps, self.height, self.width), dtype=np.float32)
+        self.weights = np.zeros(shape=(self.k_comps, self.height, self.width), dtype=np.float32)
         self.weights[0, :, :] = 1.0
 
     def update(self, frame: np.ndarray, diff_square_sum: np.ndarray, match_threshold: np.float32, update_alpha: np.float32):
@@ -33,7 +33,7 @@ class GMM_CPU:
         min_err_comps = masked_error.argmin(axis=0)                       
 
         matches = matched_pixels[None, :, :] & (
-            np.arange(self.n_comps)[:, None, None] == min_err_comps[None, :, :]
+            np.arange(self.k_comps)[:, None, None] == min_err_comps[None, :, :]
         )                                                                  
 
         # Decay weights
@@ -66,7 +66,7 @@ class GMM_CPU:
         # Normalize weights
         self.weights /= self.weights.sum(axis=0, keepdims=True)
 
-    def predict(self, frame: np.ndarray, match_threshold: np.float32, background_threshold: np.float32):
+    def predict(self, frame: np.ndarray, match_threshold: np.float32, weight_threshold: np.float32):
         
         # Squared L2 (without variance)
         diff = frame[None, :, :, :] - self.means         
@@ -83,7 +83,7 @@ class GMM_CPU:
         cumulative_weights = np.cumsum(sorted_weights, axis=0)
 
         # Select background components
-        background_components = cumulative_weights <= background_threshold
+        background_components = cumulative_weights <= weight_threshold
 
         # Ensure the first component is always included
         background_components[0] = True
@@ -101,9 +101,9 @@ class GMM_CPU:
 
         return foreground_mask, diff_square_sum
 
-    def step_profiler(self, frame: np.ndarray, match_threshold: np.float32, background_threshold: np.float32, update_alpha: np.float32):
+    def step_profiler(self, frame: np.ndarray, match_threshold: np.float32, weight_threshold: np.float32, update_alpha: np.float32):
 
-        mask, diff_square_sum, predict_profile = self.predict_profiler(frame, match_threshold, background_threshold)
+        mask, diff_square_sum, predict_profile = self.predict_profiler(frame, match_threshold, weight_threshold)
 
         update_profile = self.update_profiler(frame, diff_square_sum, match_threshold, update_alpha)
 
@@ -122,7 +122,7 @@ class GMM_CPU:
 
         masked_error, time_dict['masked_error'] = cpu_timer(lambda: diff_square_sum + (~valid_diff) * large_value) # Push invalid components error to max
         min_err_comps, time_dict['min_err_comps'] = cpu_timer(lambda: masked_error.argmin(axis=0)) # Use argmin to get the minimum error component for each pixel
-        matches, time_dict['matches'] = cpu_timer(lambda: matched_pixels[None, :, :] & (np.arange(self.n_comps)[:, None, None] == min_err_comps[None, :, :]))
+        matches, time_dict['matches'] = cpu_timer(lambda: matched_pixels[None, :, :] & (np.arange(self.k_comps)[:, None, None] == min_err_comps[None, :, :]))
                     
 
         # Update weights of components
@@ -165,7 +165,7 @@ class GMM_CPU:
 
         return time_dict
 
-    def predict_profiler(self, frame: np.ndarray, match_threshold: np.float32, background_threshold: np.float32):
+    def predict_profiler(self, frame: np.ndarray, match_threshold: np.float32, weight_threshold: np.float32):
         time_dict = dict()
 
         # Compute error between pixel and each component's mean on 3 channels (R, G, B)
@@ -182,7 +182,7 @@ class GMM_CPU:
         cumulative_weights, time_dict['weight_accumulate'] = cpu_timer(lambda: np.cumsum(sorted_weights, axis=0))
 
         # Background components
-        background_components, time_dict['background_comps'] = cpu_timer(lambda: cumulative_weights <= background_threshold)
+        background_components, time_dict['background_comps'] = cpu_timer(lambda: cumulative_weights <= weight_threshold)
     
         # Ensure first component is always included
         background_components[0], time_dict['first_comp'] = cpu_timer(lambda: True)

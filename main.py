@@ -1,122 +1,119 @@
 import cv2
+import argparse
 import numpy as np
-import cupy as cp
 
+from settings import *
 from utils import *
-
 from gmm import *
 
 from tester import compare_diff_square_sum
 
-# --------------------------------------------------------------------------------------
-# Input initialization
+if __name__ == "__main__":
+    # --------------------------------------------------------------------------------------
+    # Models declaration
 
-# cam = cv2.VideoCapture('test_video.mp4')
-cam = cv2.VideoCapture(0)
-# cam.set(cv2.CAP_PROP_BUFFERSIZE, 9)
-
-CAM_WIDTH = cam.get(cv2.CAP_PROP_FRAME_WIDTH)
-CAM_HEIGHT = cam.get(cv2.CAP_PROP_FRAME_HEIGHT)
-
-running = True if cam.isOpened() else False
-
-while True:
-    flag, first_frame = cam.read()
-    if flag:
-        break
+    model_list = {
+        0: ("CPU", GMM_CPU),
+        1: ("Numba", GMM_CPU_NUMBA),
+        2: ("CuPy vectorized", GMM_CUPY_V0),
+        3: ("CuPy RawKernel", GMM_CUPY_V1)
+    }
 
 
-# --------------------------------------------------------------------------------------
-# Model initialization
-# 0 - CPU - Numpy baseline
-# 1 - Numba parallelized
-# 2 - Cupy built-in functions on GPU 
+    # --------------------------------------------------------------------------------------
+    # Arguments handling
+    parser = argparse.ArgumentParser()
 
-model_list = [
-    GMM_CPU,
-    GMM_CPU_NUMBA,
-    GMM_CUPY_V0,
-    GMM_CUPY_V1
-]
+    parser.add_argument("--input_path", type=str, default="0", help="Input source")
+    parser.add_argument("--model", type=int, default=0, help="""
+        Model selection: """ + " | ".join([f"{idx} - {name}" for idx, (name, _) in model_list.items()]))
+    parser.add_argument("--n_components", type=int, default=7, help="Number of Gaussian components per pixel")
+    parser.add_argument("--update_alpha", type=float, default=0.01, help="Updating rate for components")
+    parser.add_argument("--match_threshold", type=float, default=3.5, help="Background matching threshold")
+    parser.add_argument("--weight_threshold", type=float, default=0.7, help="Cumulative weight threshold for components")
 
-# Model selection
-model_choice = 3
+    args = parser.parse_args()
 
-# Parameters config
-gaussian_components = 7
-match_threshold = np.float32(3.5)
-background_threshold = np.float32(0.7)
-update_alpha = np.float32(0.01)
+    input_path = 0 if args.input_path == "0" else args.input_path
 
-model = model_list[model_choice](first_frame, n_components=gaussian_components, parallel=True)
-model_base = GMM_CPU(first_frame, n_components=gaussian_components)
+    if not (0 <= args.model < len(model_list.keys())):
+        raise ValueError("Unknown model")
+
+    if not (1 <= args.n_components <= MAX_COMPONENTS):
+        raise ValueError("Invalid number of Gaussian components")
 
 
-# --------------------------------------------------------------------------------------
-# Utilities 
+    # --------------------------------------------------------------------------------------
+    # Input initialization
 
-def cpu_step(model, frame: np.ndarray):
-    # Predict step 
-    (mask, diff_square_sum), predict_cost = cpu_timer(model.predict, frame=frame, match_threshold=match_threshold, background_threshold=background_threshold)
+    input_source = cv2.VideoCapture(input_path)
 
-    # Update step
-    _, update_cost = cpu_timer(model.update, frame=frame, diff_square_sum=diff_square_sum, match_threshold=match_threshold, update_alpha=update_alpha)
+    CAM_WIDTH = input_source.get(cv2.CAP_PROP_FRAME_WIDTH)
+    CAM_HEIGHT = input_source.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    return mask, predict_cost + update_cost
+    running = True if input_source.isOpened() else False
 
-def gpu_step(model, frame: np.ndarray):
-    # Data transfer from host to device
-    gpu_frame, to_dvc_cost = cpu_timer(cp.asarray, frame)
-
-    # Predict step
-    (gpu_mask, diff_square_sum), predict_cost = gpu_timer(model.predict, frame=gpu_frame, match_threshold=match_threshold, background_threshold=background_threshold)
+    while True:
+        flag, first_frame = input_source.read()
+        if flag:
+            break
 
 
-    # Update step
-    _, update_cost = gpu_timer(model.update, frame=gpu_frame, diff_square_sum=diff_square_sum, match_threshold=match_threshold, update_alpha=update_alpha)
+    # --------------------------------------------------------------------------------------
+    # Model initialization
 
-    # Data transfer from device to host
-    mask, to_host_cost = cpu_timer(gpu_mask.get)
+    # Model selection
+    model_choice = args.model
 
-    total_time = to_dvc_cost + (predict_cost + update_cost) + to_host_cost
-    return mask, total_time
+    # Parameters config
+    gaussian_components = args.n_components
+    update_alpha = np.float32(args.update_alpha)
+    match_threshold = np.float32(args.match_threshold)
+    weight_threshold = np.float32(args.weight_threshold)
 
-model_fps_graph = FPS_Graph(400, 400)
-
-
-# --------------------------------------------------------------------------------------
-base_func = cpu_step
-if model_choice >= 2:
-    step_func = gpu_step
-    cp_gpu_warmup()
-else:
-    step_func = cpu_step
-
-print("Ready")
-while running:
-    flag, frame = cam.read()
-
-    if not flag:
-        running = False
-        continue
-
-    # Convert the frame to planar mode (C, H, W) with C=3 (BGR)
-    planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
-
-    mask, time_cost = step_func(model, planar_frame)
-    model_fps = int(1/time_cost)
-    model_fps_graph.write_value(model_fps)
-    # mask_base, time_cost_base = base_func(model_base, planar_frame)
-
-    refined_mask = mask_refiner(mask)
-    result = background_subtractor(frame, refined_mask)
-    # result = cv2.putText(result, str(int(1/time_cost)), (5, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2)
+    model = model_list[model_choice][1](first_frame, n_components=gaussian_components, parallel=True)
 
 
-    cv2.imshow("Mask", mask)
-    cv2.imshow("Result", result)
-    model_fps_graph.display("Numba FPS", model_fps)
+    # --------------------------------------------------------------------------------------
+    # Utilities 
 
-    key = cv2.waitKey(1)
-    if key == ord('q') or key == 27:
-        running = False
+    if model_choice >= 2:
+        step_func = gpu_step
+        cp_gpu_warmup()
+    else:
+        step_func = cpu_step
+
+    # --------------------------------------------------------------------------------------
+    # Running
+
+    print("Ready")
+    while running:
+        flag, frame = input_source.read()
+
+        if not flag:
+            running = False
+            continue
+
+        # Convert the frame to planar mode (C, H, W) with C=3 (BGR)
+        planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
+
+        mask, time_cost = step_func(model, planar_frame, match_threshold, update_alpha, weight_threshold)
+        model_fps = int(1/time_cost)
+
+        refined_mask = mask_refiner(mask)
+        result = background_subtractor(frame, refined_mask)
+
+        cv2.putText(result,
+            f"{model_fps}",
+            (5, 25),
+            cv2.FONT_HERSHEY_TRIPLEX,
+            1,
+            (0, 255, 0),
+            1)
+
+        cv2.imshow("Mask", mask)
+        cv2.imshow("Result", result)
+
+        key = cv2.waitKey(1)
+        if key == ord('q') or key == 27:
+            running = False

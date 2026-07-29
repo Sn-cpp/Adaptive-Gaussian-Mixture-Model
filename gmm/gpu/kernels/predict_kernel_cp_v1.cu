@@ -8,7 +8,7 @@ extern "C" __global__ void predict_gmm(
     float* vars,                  // (K, H, W)
     float* weights,               // (K, H, W)
     float match_threshold,
-    float background_threshold,
+    float weight_threshold,
     int num_pixels, int C, int K
 ) {
     // Thread coordinating values
@@ -68,7 +68,7 @@ extern "C" __global__ void predict_gmm(
             cumulative_weight += weights[num_pixels*order[k] + i];
 
             // Use cumulative relative weight and threshold to determine the background
-            bool included = (k == 0 || cumulative_weight <= background_threshold);
+            bool included = (k == 0 || cumulative_weight <= weight_threshold);
             if (!included)
                 break; // Exceeding threshold
             

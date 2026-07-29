@@ -2,17 +2,19 @@ import cv2
 import os
 import glob
 
-def images_to_video(image_folder, output_video_path, output_video_len_in_seconds: int, fps=30):
-    # Find all .jpg images in the directory
+def images_to_video(image_folder, output_video_path, file_type: str="jpg", output_video_len_in_seconds: int=-1, fps=30):
+    # Find all images in the directory
     # Using glob ensures we can match extensions easily
-    image_files = glob.glob(os.path.join(image_folder, "*.jpg"))
+    image_files = glob.glob(os.path.join(image_folder, f"*.{file_type}"))
     
     # Sort files alphanumeric so they sequence correctly (e.g., frame1, frame2...)
     image_files.sort(key=lambda f: [int(c) if c.isdigit() else c for c in os.path.split(f)[-1].replace('.', '').split()])
 
     if not image_files:
-        print("No .jpg images found in the specified directory.")
+        print(f"No .{file_type} images found in the specified directory.")
         return
+    
+    output_video_len_in_seconds = len(image_files) if output_video_len_in_seconds == -1 else output_video_len_in_seconds
 
     # Read the first image to dynamically obtain dimensions (width, height)
     first_image = cv2.imread(image_files[0])
@@ -44,4 +46,5 @@ def images_to_video(image_folder, output_video_path, output_video_len_in_seconds
     print(f"Video successfully saved to: {output_video_path}")
 
 # Example Usage:
-images_to_video('datasets/dataset2012/dataset/baseline/highway/input', 'test_video.mp4', 30, fps=30)
+images_to_video('datasets/dataset2012/dataset/baseline/highway/input', 'input.mp4', 'jpg', 120, fps=30)
+images_to_video('datasets/dataset2012/dataset/baseline/highway/groundtruth', 'groundtruth.mp4', 'png', 120, fps=30)

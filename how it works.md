@@ -63,7 +63,7 @@ For each incoming frame `frame`:
 
     + Compute cumulative sum of weights of sorted components, denoted `cumulative_weights` 
 
-    + Select `background_components` where `matched` = `True` and  `cumulative_weights` < `background_threshold` (always include the first component).
+    + Select `background_components` where `matched` = `True` and  `cumulative_weights` < `weight_threshold` (always include the first component).
 
     
 

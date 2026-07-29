@@ -7,18 +7,18 @@ class GMM_CUPY_V0:
     def __init__(self, first_frame: np.ndarray, n_components: int, *arg, **kwargs):        
         self.height, self.width, _ = first_frame.shape
         
-        self.n_comps = n_components
+        self.k_comps = n_components
 
         # First component mean with the first frame
-        self.means = np.ones(shape=(self.n_comps, 3, self.height, self.width), dtype=np.float32)
+        self.means = np.ones(shape=(self.k_comps, 3, self.height, self.width), dtype=np.float32)
         self.means[0, :, :, :] = first_frame.transpose(2, 0, 1)
         self.means = cp.asarray(self.means)
     
         # All variances to a fixed value
-        self.vars = cp.full(shape=(self.n_comps, self.height, self.width), fill_value=INIT_VAR, dtype=cp.float32)
+        self.vars = cp.full(shape=(self.k_comps, self.height, self.width), fill_value=INIT_VAR, dtype=cp.float32)
         
         # Weight of the first component of each pixel is 1.0, the others are 0.0
-        self.weights = cp.zeros(shape=(self.n_comps, self.height, self.width), dtype=cp.float32)
+        self.weights = cp.zeros(shape=(self.k_comps, self.height, self.width), dtype=cp.float32)
         self.weights[0, :, :] = 1.0
 
     def update(self, frame: cp.ndarray, diff_square_sum: cp.ndarray, match_threshold: np.float32, update_alpha: np.float32):
@@ -34,7 +34,7 @@ class GMM_CUPY_V0:
         min_err_comps = masked_error.argmin(axis=0)                       
 
         matches = matched_pixels[None, :, :] & (
-            cp.arange(self.n_comps)[:, None, None] == min_err_comps[None, :, :]
+            cp.arange(self.k_comps)[:, None, None] == min_err_comps[None, :, :]
         )                                                                  
 
         # Update weights
@@ -65,7 +65,7 @@ class GMM_CUPY_V0:
         # Normalize weights
         self.weights /= self.weights.sum(axis=0, keepdims=True)
 
-    def predict(self, frame: cp.ndarray, match_threshold: np.float32, background_threshold: np.float32):
+    def predict(self, frame: cp.ndarray, match_threshold: np.float32, weight_threshold: np.float32):
         
         # Squared L2 (without variance)
         diff = frame[None, :, :, :] - self.means         
@@ -82,7 +82,7 @@ class GMM_CUPY_V0:
         cumulative_weights = cp.cumsum(sorted_weights, axis=0)
 
         # Select background components
-        background_components = cumulative_weights <= background_threshold
+        background_components = cumulative_weights <= weight_threshold
 
         # Ensure the first component is always included
         background_components[0] = True

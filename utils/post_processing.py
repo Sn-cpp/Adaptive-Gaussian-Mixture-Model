@@ -9,7 +9,6 @@ kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 # kernel_fill = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
 
-
 # --------------------------------------------------------------------------------------
 
 def mask_refiner(mask: np.ndarray):
