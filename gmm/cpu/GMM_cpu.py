@@ -20,7 +20,8 @@ class GMM_CPU:
         self.weights = np.zeros(shape=(self.k_comps, self.height, self.width), dtype=np.float32)
         self.weights[0, :, :] = 1.0
 
-    def update(self, frame: np.ndarray, diff_square_sum: np.ndarray, match_threshold: np.float32, update_alpha: np.float32):
+    def update(self, frame: np.ndarray, mask: np.ndarray, diff_square_sum: np.ndarray,
+               match_threshold: np.float32, update_alpha: np.float32):
 
         # Components satisfying matching threshold
         valid_diff = diff_square_sum < (match_threshold ** 2) * self.vars
@@ -32,12 +33,14 @@ class GMM_CPU:
 
         min_err_comps = masked_error.argmin(axis=0)                       
 
+        background_mask = (mask == 0)
+
         matches = matched_pixels[None, :, :] & (
             np.arange(self.k_comps)[:, None, None] == min_err_comps[None, :, :]
-        )                                                                  
+        ) & background_mask                                         
 
         # Decay weights
-        self.weights *= (1.0 - update_alpha)
+        self.weights[background_mask] *= (1.0 - update_alpha)
 
         # Update weights
         self.weights[matches] += update_alpha
@@ -100,6 +103,18 @@ class GMM_CPU:
         foreground_mask = (~background_mask).astype(np.uint8) * 255
 
         return foreground_mask, diff_square_sum
+
+    def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32):
+        # Predict step 
+        (mask, diff_square_sum), predict_cost = cpu_timer(self.predict, frame=frame, match_threshold=match_threshold, weight_threshold=weight_threshold)
+
+        # Update step
+        _, update_cost = cpu_timer(self.update, frame=frame, mask=mask, diff_square_sum=diff_square_sum, match_threshold=match_threshold, update_alpha=update_alpha)
+
+        # Refine mask
+        # TODO
+
+        return mask, predict_cost + update_cost
 
     def step_profiler(self, frame: np.ndarray, match_threshold: np.float32, weight_threshold: np.float32, update_alpha: np.float32):
 

@@ -2,6 +2,7 @@ import cv2
 import argparse
 import numpy as np
 from time import sleep
+import keyboard as kb
 
 from settings import *
 from utils import *
@@ -88,18 +89,12 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------------------------
     # Utilities 
 
-    if model_choice >= 2:
-        step_func = gpu_step
-        cp_gpu_warmup()
-    else:
-        step_func = cpu_step
-
     # Execution time
     cpu_fps_last = 0
     model_fps_last = 0
     fps_graph = Monitor(800, 400, 360, np.arange(30, 360, 30), "FPS", f"Green-CPU base | Red-{model_list[model_choice][0]}", (5, 15))
 
-    # IOU metric
+    # Intersection over Union (IOU) metric
     iou_mog2_last = 0
     iou_cpu_last = 0
     iou_model_last = 0
@@ -109,97 +104,112 @@ if __name__ == "__main__":
     mask_mae_last = 0
     mae_graph = Monitor(400, 400, 0.01, np.round(np.arange(0.001, 0.01, 0.001), 3), "CPU vs Model Masks MAE")
 
+    # Number of different pixels
+    diff_max = (CAM_WIDTH * CAM_HEIGHT) // 8
+    mask_diff_last = 0
+    mask_diff_graph = Monitor(400, 400, diff_max, np.arange(1000, diff_max, 1000), "CPU vs Model Different pixels count")
+
     # --------------------------------------------------------------------------------------
     # Running
+
+    # Warmup the GPU (if used)
+    if model_choice >= 2:
+        cp_gpu_warmup()
 
     print("Sanity check:")
     print("cv2_gmm:    ", type(cv2_gmm))
     print("base_model: ", type(base_model))
     print("model:      ", type(model))
-
     print("Ready")
+
+    pause = False
     while running:
-        input_flag, frame = input_source.read()
-        gth_flag, ground = groundtruth_source.read()
+        if kb.is_pressed("space"):
+            pause = not pause
+            sleep(0.1)
+            print(pause)
+    
+        if not pause:
+            input_flag, frame = input_source.read()
+            gth_flag, ground = groundtruth_source.read()
 
-        if not (input_flag and gth_flag):
-            running = False
-            continue
+            if not (input_flag and gth_flag):
+                running = False
+                continue
 
-        # Convert the frame to planar mode (C, H, W) with C=3 (BGR)
-        planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
-        ground = cv2.cvtColor(ground, cv2.COLOR_BGR2GRAY)
-        _, ground = cv2.threshold(ground, 127, 255, cv2.THRESH_BINARY)
+            # Convert the frame to planar mode (C, H, W) with C=3 (BGR)
+            planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
+            ground = cv2.cvtColor(ground, cv2.COLOR_BGR2GRAY)
+            _, ground = cv2.threshold(ground, 127, 255, cv2.THRESH_BINARY)
 
-        # Predict mask
-        mask_mog2 = cv2_gmm.apply(frame)
+            # Predict mask
+            mask_mog2 = cv2_gmm.apply(frame)
 
-        mask_cpu, cpu_cost = cpu_step(base_model, planar_frame, match_threshold, update_alpha, weight_threshold)
+            mask_cpu, cpu_cost = base_model.step(planar_frame, match_threshold, update_alpha, weight_threshold)
 
-        mask_model, model_cost = step_func(model, planar_frame, match_threshold, update_alpha, weight_threshold)
+            mask_model, model_cost = model.step(planar_frame, match_threshold, update_alpha, weight_threshold)
 
-        # Post-process masks
-        refined_mask_mog2 = mask_refiner(mask_mog2)
-        # refined_cv2_gmm = cv2.threshold(refined_cv2_gmm, 127, 255, cv2.THRESH_BINARY) # MOG2 somehow produces gray region
+            # Post-process masks
+            refined_mask_mog2 = mask_refiner(mask_mog2)
+            # refined_cv2_gmm = cv2.threshold(refined_cv2_gmm, 127, 255, cv2.THRESH_BINARY) # MOG2 somehow produces gray region
 
-        refined_cpu = mask_refiner(mask_cpu)
-        refined_model = mask_refiner(mask_model)
+            refined_cpu = mask_refiner(mask_cpu)
+            refined_model = mask_refiner(mask_model)
 
-        # Combine groundtruth and masks into a single frame
-        mask_grid = cv2.vconcat([
-            np.full(shape=(30, 2*CAM_WIDTH + 3), fill_value=127, dtype=np.uint8),
-            cv2.hconcat([ground, np.full(shape=(CAM_HEIGHT, 3), fill_value=127, dtype=np.uint8), refined_mask_mog2]),
-            np.full(shape=(30, 2*CAM_WIDTH + 3), fill_value=127, dtype=np.uint8),
-            cv2.hconcat([refined_cpu, np.full(shape=(CAM_HEIGHT, 3), fill_value=127, dtype=np.uint8), refined_model])
-        ])
+            # Combine groundtruth and masks into a single frame
+            mask_grid = cv2.vconcat([
+                np.full(shape=(30, 2*CAM_WIDTH + 3), fill_value=127, dtype=np.uint8),
+                cv2.hconcat([ground, np.full(shape=(CAM_HEIGHT, 3), fill_value=127, dtype=np.uint8), refined_mask_mog2]),
+                np.full(shape=(30, 2*CAM_WIDTH + 3), fill_value=127, dtype=np.uint8),
+                cv2.hconcat([refined_cpu, np.full(shape=(CAM_HEIGHT, 3), fill_value=127, dtype=np.uint8), refined_model])
+            ])
 
-        # Put description
-        cv2.putText(mask_grid, "Groundtruth", (5, 20), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
-        cv2.putText(mask_grid, "opencv's MOG2", (CAM_WIDTH + 8, 20), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
-        cv2.putText(mask_grid, "CPU Baseline", (5, 50 + CAM_HEIGHT), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
-        cv2.putText(mask_grid, f"{model_list[model_choice][0]}", (CAM_WIDTH + 8, 50 + CAM_HEIGHT), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
+            # Put description
+            cv2.putText(mask_grid, "Groundtruth", (5, 20), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
+            cv2.putText(mask_grid, "opencv's MOG2", (CAM_WIDTH + 8, 20), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
+            cv2.putText(mask_grid, "CPU Baseline", (5, 50 + CAM_HEIGHT), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
+            cv2.putText(mask_grid, f"{model_list[model_choice][0]}", (CAM_WIDTH + 8, 50 + CAM_HEIGHT), cv2.FONT_HERSHEY_TRIPLEX, 0.7, 255, 1)
 
-        cv2.imshow("Groundtruth and Models' masks", mask_grid)
+            cv2.imshow("Groundtruth and Models' masks", mask_grid)
 
-        # Write FPS values
-        fps_cpu = int(1 / cpu_cost)
-        fps_model = int(1 / model_cost)
-        fps_graph.write_value(fps_cpu, cpu_fps_last, (0, 255, 0))
-        fps_graph.write_value(fps_model, model_fps_last, (0, 0, 255))
-        fps_graph.display(f"CPU: {fps_cpu} | {model_list[model_choice][0]}: {fps_model}", (5, 30))
-        cpu_fps_last = fps_cpu
-        model_fps_last = fps_model
+            # Write FPS values
+            fps_cpu = int(1 / cpu_cost)
+            fps_model = int(1 / model_cost)
+            fps_graph.write_value(fps_cpu, cpu_fps_last, (0, 255, 0))
+            fps_graph.write_value(fps_model, model_fps_last, (0, 0, 255))
+            fps_graph.display(f"CPU: {fps_cpu} | {model_list[model_choice][0]}: {fps_model}", (5, 30))
 
+            # Compute IOU for each models
+            iou_mog2 = compute_iou(refined_mask_mog2, ground)
+            iou_cpu = compute_iou(refined_cpu, ground)
+            iou_model = compute_iou(refined_model, ground)
 
-        # Compute IOU for each models
-        iou_mog2 = compute_iou(refined_mask_mog2, ground)
-        iou_cpu = compute_iou(refined_cpu, ground)
-        iou_model = compute_iou(refined_model, ground)
+            # Write latest value to graph for displaying
+            iou_graph.write_value(iou_mog2, iou_mog2_last, (255, 0, 0))
+            iou_graph.write_value(iou_cpu, iou_cpu_last, (0, 255, 0))
+            iou_graph.write_value(iou_model, iou_model_last, (0, 0, 255))
+            iou_graph.display()
 
-        # Write latest value to graph for displaying
-        iou_graph.write_value(iou_mog2, iou_mog2_last, (255, 0, 0))
-        iou_graph.write_value(iou_cpu, iou_cpu_last, (0, 255, 0))
-        iou_graph.write_value(iou_model, iou_model_last, (0, 0, 255))
-        iou_graph.display()
+            # Compute MAE between CPU and Model masks
+            abs_err = np.abs(refined_cpu - refined_model) / 255
+            mae = abs_err.mean()
+            mae_graph.write_value(mae, mask_mae_last, (0, 0, 255))
+            mae_graph.display(f"{mae:2f}", (300, 15))
 
-        # Save current value as the last
-        iou_mog2_last = iou_mog2
-        iou_cpu_last = iou_cpu
-        iou_model_last = iou_model
+            # Count number of different pixels
+            diff_count = np.count_nonzero(abs_err)
+            mask_diff_graph.write_value(diff_count, mask_diff_last, (0, 0, 255))
+            mask_diff_graph.display(f"Diff count: {diff_count}", (300, 15))
 
-
-        # Compute MAE between CPU and Model masks
-        abs_err = np.abs(refined_cpu - refined_model) / 255
-        mae = abs_err.mean()
-        mae_graph.write_value(mae, mask_mae_last, (0, 0, 255))
-        mae_graph.display(f"{mae:2f}", (300, 15))
-        mask_mae_last = mae
-
+            # Save to histories
+            cpu_fps_last = fps_cpu
+            model_fps_last = fps_model
+            iou_mog2_last = iou_mog2
+            iou_cpu_last = iou_cpu
+            iou_model_last = iou_model
+            mask_mae_last = mae
+            mask_diff_last = diff_count
 
         key = cv2.waitKey(1)
         if key == ord('q') or key == 27:
             running = False
-
-
-        
-

@@ -1,6 +1,7 @@
 import numpy as np
 import cupy as cp
 
+from utils import gpu_timer
 from settings import INIT_VAR, REINIT_WEIGHT
 
 class GMM_CUPY_V0:
@@ -99,3 +100,15 @@ class GMM_CUPY_V0:
         foreground_mask = (~background_mask).astype(cp.uint8) * 255
 
         return foreground_mask, diff_square_sum
+
+    def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32):
+        # Predict step 
+        (mask, diff_square_sum), predict_cost = gpu_timer(self.predict, frame=frame, match_threshold=match_threshold, weight_threshold=weight_threshold)
+
+        # Update step
+        _, update_cost = gpu_timer(self.update, frame=frame, diff_square_sum=diff_square_sum, match_threshold=match_threshold, update_alpha=update_alpha)
+
+        # Refine mask
+        # TODO
+
+        return mask, predict_cost + update_cost

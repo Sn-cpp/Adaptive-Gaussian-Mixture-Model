@@ -75,16 +75,11 @@ if __name__ == "__main__":
 
 
     # --------------------------------------------------------------------------------------
-    # Utilities 
-
-    if model_choice >= 2:
-        step_func = gpu_step
-        cp_gpu_warmup()
-    else:
-        step_func = cpu_step
-
-    # --------------------------------------------------------------------------------------
     # Running
+
+    # Warmup the GPU (if used)
+    if model_choice >= 2:
+        cp_gpu_warmup()
 
     print("Ready")
     while running:
