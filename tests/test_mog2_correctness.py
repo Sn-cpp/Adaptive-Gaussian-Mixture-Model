@@ -96,12 +96,12 @@ def test_opencv_parity_color():
 
 
 def test_opencv_parity_real_video():
-    """Real 8-bit video, where OpenCV's FMA contraction shows up.
+    """Real 8-bit video, where OpenCV's FMA contraction can show up.
 
-    Synthetic input matches bit for bit; on real footage a handful of pixels per
-    frame land on the other side of a threshold because the compiled OpenCV
-    kernel contracts `acc += d*d` into an FMA and rounds once where we round
-    twice. Budget: 0.05% of pixels.
+    Platform-dependent: on x86-64 Linux (Colab) this is exact — 0 of 2,304,000
+    pixels differ. On macOS arm64 ~0.002% differ, because that OpenCV build
+    contracts `acc += d*d` into an FMA and rounds once where we round twice.
+    Budget: 0.05% of pixels.
     """
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
     path = os.path.join(root, 'test_video.mp4')

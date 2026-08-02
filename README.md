@@ -114,11 +114,15 @@ simulator:
 NUMBA_ENABLE_CUDASIM=1 python tests/test_mog2_correctness.py
 ```
 
-Against OpenCV MOG2: bit-exact on synthetic sequences (grayscale and colour,
-including `getBackgroundImage`); on real 8-bit video ~0.002% of pixels differ,
-IoU 0.99, because OpenCV's compiled kernel contracts `acc += d*d` into an FMA
-and rounds once where we round twice. The three MOG2 models agree with each
-other exactly.
+Against OpenCV MOG2: bit-exact on synthetic sequences, grayscale and colour,
+including `getBackgroundImage`. On real 8-bit video it is also exact on x86-64
+Linux (0/2,304,000 pixels differ on Colab); on macOS arm64 ~0.002% of pixels
+differ (IoU 0.99), because that OpenCV build contracts `acc += d*d` into an FMA
+and rounds once where we round twice.
+
+The three MOG2 models agree with each other on masks exactly. CPU vs CUDA state
+arrays differ by at most 8e-6 on a T4, from the same FMA contraction in the GPU
+kernel — well inside the 1e-5 tolerance the suite asserts.
 
 ## Project Structure
 
@@ -162,6 +166,29 @@ below the background ratio `TB = 0.9`. At the default `alpha = 1/500` that is
 ~53 frames (~1.8 s at 30 FPS). It is **not** `TB × history`. Lower the learning
 rate to keep still subjects sharp for longer; the test suite checks this against
 OpenCV at three learning rates.
+
+## Measured results
+
+Google Colab, **Tesla T4** + 2 vCPU, `test_video.mp4`, full pipeline
+(model + morphology + separable blur + composite), median over 30 frames:
+
+| Resolution | `GMM_CPU_MOG2` | `GMM_CPU_NUMBA_MOG2` | `GMM_CUDA_MOG2` | `GMM_CUDA_MOG2` streamed |
+|---|---|---|---|---|
+| 480p  | 0.30 FPS | 13.3 FPS | **371 FPS** | 410 FPS |
+| 720p  | 0.11 FPS |  4.3 FPS | **114 FPS** | 125 FPS |
+| 1080p | 0.05 FPS |  1.9 FPS | **40.2 FPS** | 37.6 FPS |
+
+Speedup over the sequential Python reference at 1080p: 41× (Numba, 2 vCPU) and
+**877×** (CUDA). Streaming buys ~10% at 480p/720p but costs ~6% at 1080p, where
+compute already dominates and the extra pinned staging buffer does not pay for
+itself.
+
+Blur at 1080p — separable + shared-memory tiled vs the naive 2D convolution:
+**22.6× faster on the T4** (1.56 ms vs 35.2 ms), 7.5× on CPU.
+
+## Target
+
+Full HD (1920×1080) at >30 FPS on an NVIDIA T4 — met, at 40.2 FPS.
 
 ## Authors
 
