@@ -6,8 +6,6 @@ from settings import *
 from utils import *
 from gmm import *
 
-from tester import compare_diff_square_sum
-
 if __name__ == "__main__":
     # --------------------------------------------------------------------------------------
     # Models declaration
@@ -16,8 +14,16 @@ if __name__ == "__main__":
         0: ("CPU", GMM_CPU),
         1: ("Numba", GMM_CPU_NUMBA),
         2: ("CuPy vectorized", GMM_CUPY_V0),
-        3: ("CuPy RawKernel", GMM_CUPY_V1)
+        3: ("CuPy RawKernel", GMM_CUPY_V1),
+        4: ("MOG2 CPU", GMM_CPU_MOG2),
+        5: ("MOG2 Numba", GMM_CPU_NUMBA_MOG2),
+        6: ("MOG2 CUDA", GMM_CUDA_MOG2),
     }
+
+    # Models 4-6 reproduce OpenCV's BackgroundSubtractorMOG2. They keep their own
+    # calibrated thresholds (settings.MOG2_*) and ignore --match_threshold /
+    # --weight_threshold; --update_alpha still applies, and a negative value
+    # selects OpenCV's warm-up ramp 1/min(2*nframes, history).
 
 
     # --------------------------------------------------------------------------------------
@@ -38,6 +44,10 @@ if __name__ == "__main__":
 
     if not (0 <= args.model < len(model_list.keys())):
         raise ValueError("Unknown model")
+
+    if model_list[args.model][1] is None:
+        raise ValueError(f"Model {args.model} ({model_list[args.model][0]}) is unavailable — "
+                         "its GPU dependency (cupy or numba.cuda) is not installed")
 
     if not (1 <= args.n_components <= MAX_COMPONENTS):
         raise ValueError("Invalid number of Gaussian components")
@@ -77,8 +87,8 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------------------------
     # Running
 
-    # Warmup the GPU (if used)
-    if model_choice >= 2:
+    # Warmup the GPU (only the CuPy models need it)
+    if model_choice in (2, 3):
         cp_gpu_warmup()
 
     print("Ready")
@@ -92,8 +102,12 @@ if __name__ == "__main__":
         # Convert the frame to planar mode (C, H, W) with C=3 (BGR)
         planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
 
-        mask, time_cost = step_func(model, planar_frame, match_threshold, update_alpha, weight_threshold)
-        model_fps = int(1/time_cost)
+        mask, time_cost = model.step(planar_frame, match_threshold, update_alpha, weight_threshold)
+        model_fps = int(1 / max(time_cost, 1e-9))
+
+        # MOG2 marks shadows as 127; anything that is not 255 is background.
+        # No-op for the Stauffer-Grimson models, whose masks are already 0/255.
+        mask = np.where(mask == 255, np.uint8(255), np.uint8(0))
 
         refined_mask = mask_refiner(mask)
         result = background_subtractor(frame, refined_mask)
