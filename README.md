@@ -1,8 +1,15 @@
 # Adaptive Gaussian Mixture Model
 
-Real-time background subtraction using the Stauffer-Grimson adaptive Gaussian Mixture Model (1999), with multiple backend implementations for performance comparison.
+Real-time background subtraction and video background blur, with multiple
+backend implementations for performance comparison.
 
 ## Backends
+
+Two families of models share one class contract and one planar state layout
+(`means (K,C,H,W)`, `vars (K,H,W)`, `weights (K,H,W)`), and take planar
+`(C, H, W)` float32 frames.
+
+**Stauffer-Grimson (1999)** — fixed K, constant-alpha EMA:
 
 | Backend | Class | Description |
 |---|---|---|
@@ -11,17 +18,41 @@ Real-time background subtraction using the Stauffer-Grimson adaptive Gaussian Mi
 | CuPy vectorized (GPU) | `GMM_CUPY_V0` | CuPy array operations on GPU |
 | CuPy RawKernel (GPU) | `GMM_CUPY_V1` | Custom CUDA kernels via CuPy RawKernel |
 
+**MOG2 (Zivkovic 2004)** — a port of OpenCV `BackgroundSubtractorMOG2`:
+
+| Backend | Class | Description |
+|---|---|---|
+| Python (CPU) | `GMM_CPU_MOG2` | Plain Python reference — the specification the others follow |
+| Numba (CPU) | `GMM_CPU_NUMBA_MOG2` | `@njit(parallel=True)`, `prange` over rows |
+| Numba CUDA (GPU) | `GMM_CUDA_MOG2` | `@cuda.jit`, model state resident on the GPU |
+
+The MOG2 family adds a per-pixel adaptive mode count, the `k = alpha/w_new`
+update, variance clamping, complexity-reduction pruning, separate `Tb`/`Tg`/`TB`
+thresholds and shadow detection — which is what makes it reproduce OpenCV.
+Because MOG2 fuses classification and update into one traversal, those models
+expose `step()` instead of the `predict()` / `update()` pair.
+
 ## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-For GPU backends, install CuPy matching your CUDA version:
+For the CuPy backends, install CuPy matching your CUDA version:
 ```bash
 pip install cupy-cuda12x   # CUDA 12.x
 # or
 pip install cupy-cuda11x   # CUDA 11.x
+```
+
+CuPy is optional — only `GMM_CUPY_V0` / `GMM_CUPY_V1` need it. Everything else,
+including `GMM_CUDA_MOG2`, imports without it.
+
+Conda alternative:
+```bash
+conda env create -f environment.yml
+conda activate gmm-blur
+python tests/test_env.py
 ```
 
 ## Usage
@@ -30,9 +61,37 @@ pip install cupy-cuda11x   # CUDA 11.x
 python main.py
 ```
 
-Edit `model_choice` in `main.py` to select backend (0=CPU, 1=Numba, 2=CuPy V0, 3=CuPy V1).
+Edit `model_choice` in `main.py` to select the backend
+(0=CPU, 1=Numba, 2=CuPy V0, 3=CuPy V1, 4=MOG2 CPU, 5=MOG2 Numba, 6=MOG2 CUDA).
 
-Default parameters: `K=7`, `match_threshold=3.5`, `bg_threshold=0.7`, `alpha=0.01`.
+Stauffer-Grimson defaults: `K=7`, `match_threshold=3.5`, `bg_threshold=0.7`,
+`alpha=0.01`. MOG2 defaults match OpenCV and live in `settings.py`.
+
+The full blur pipeline —
+`frame → MOG2 step (mask) → morphological open → separable blur ⨝ composite`:
+
+```python
+from gmm import GMM_CPU_NUMBA_MOG2          # or GMM_CUDA_MOG2
+from pipeline import make_pipeline
+
+p = make_pipeline(GMM_CPU_NUMBA_MOG2, first_frame, n_components=5)
+out, mask, timings = p.process(frame_bgr)
+```
+
+The model on its own:
+
+```python
+from gmm.mog2_common import to_planar
+model = GMM_CPU_NUMBA_MOG2(first_frame, n_components=5)
+mask = model.step(to_planar(frame_bgr))     # planar (C, H, W) float32
+```
+
+Knobs: `color=False` (1-channel grayscale model instead of 3-channel),
+`detect_shadows`, `var_threshold`, `background_ratio`, and `update_alpha` on
+`step` (negative = OpenCV's `1/min(2*nframes, history)` ramp).
+
+On the GPU, `CUDAPipeline.process_stream(frames)` is the pipelined variant — the
+upload of frame *i* overlaps the compute of frame *i-1*.
 
 ## Running Tests
 
@@ -42,28 +101,67 @@ pytest tests/ -v
 
 GPU tests are automatically skipped when CuPy is not available.
 
+The MOG2 suite can also be run on its own:
+
+```bash
+python tests/test_mog2_correctness.py
+```
+
+Without an NVIDIA GPU the CUDA kernels still run — on the CPU — via Numba's
+simulator:
+
+```bash
+NUMBA_ENABLE_CUDASIM=1 python tests/test_mog2_correctness.py
+```
+
+Against OpenCV MOG2: bit-exact on synthetic sequences (grayscale and colour,
+including `getBackgroundImage`); on real 8-bit video ~0.002% of pixels differ,
+IoU 0.99, because OpenCV's compiled kernel contracts `acc += d*d` into an FMA
+and rounds once where we round twice. The three MOG2 models agree with each
+other exactly.
+
 ## Project Structure
 
 ```
 .
 ├── gmm/
+│   ├── mog2_common.py                # MOG2 state, params, background image, cv2 reference
 │   ├── cpu/
-│   │   ├── GMM_cpu.py            # NumPy vectorized
-│   │   └── GMM_cpu_numba.py      # Numba JIT (serial + parallel)
+│   │   ├── GMM_cpu.py                # NumPy vectorized
+│   │   ├── GMM_cpu_numba.py          # Numba JIT (serial + parallel)
+│   │   ├── GMM_cpu_mog2.py           # MOG2 reference implementation
+│   │   └── GMM_cpu_numba_mog2.py     # MOG2, prange over rows
 │   └── gpu/
-│       ├── GMM_cupy_v0.py        # CuPy array ops
-│       ├── GMM_cupy_v1.py        # CuPy RawKernel
-│       └── kernels/              # CUDA .cu kernel files
+│       ├── GMM_cupy_v0.py            # CuPy array ops
+│       ├── GMM_cupy_v1.py            # CuPy RawKernel
+│       ├── GMM_cuda_mog2.py          # MOG2 on Numba CUDA
+│       └── kernels/                  # CUDA .cu kernel files
 ├── utils/
-│   ├── post_processing.py        # Morphological refinement, background blur
-│   └── timer.py                  # CPU/GPU timing utilities
+│   ├── post_processing.py            # Morphological refinement, background blur (OpenCV)
+│   ├── blur_numba.py                 # Separable blur + morphology (CPU)
+│   ├── blur_cuda.py                  # Same kernels, shared-memory tiled
+│   ├── benchmark.py                  # Timing and mask-quality helpers
+│   └── timer.py                      # CPU/GPU timing utilities
 ├── tests/
-│   ├── conftest.py               # pytest fixtures
-│   └── test_correctness.py       # Cross-backend correctness tests
-├── main.py                       # Webcam/video demo entry point
-├── settings.py                   # INIT_VAR, REINIT_WEIGHT constants
+│   ├── conftest.py                   # pytest fixtures
+│   ├── test_correctness.py           # Cross-backend tests (Stauffer-Grimson)
+│   ├── test_mog2_correctness.py      # OpenCV parity, model agreement, stability
+│   └── test_env.py                   # Environment smoke test
+├── notebooks/                        # Deliverable notebook
+├── pipeline.py                       # Pipeline / CUDAPipeline (pinned buffers, 2 streams)
+├── main.py                           # Webcam/video demo entry point
+├── settings.py                       # Model constants for both families
 └── requirements.txt
 ```
+
+## Behaviour note: foreground persistence
+
+With MOG2, a person who stops moving stays foreground for
+`ln(TB) / ln(1 - alpha)` frames, because the *old* background mode has to decay
+below the background ratio `TB = 0.9`. At the default `alpha = 1/500` that is
+~53 frames (~1.8 s at 30 FPS). It is **not** `TB × history`. Lower the learning
+rate to keep still subjects sharp for longer; the test suite checks this against
+OpenCV at three learning rates.
 
 ## Authors
 
