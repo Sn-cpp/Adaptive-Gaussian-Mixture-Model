@@ -1,5 +1,4 @@
 from time import perf_counter
-import cupy as cp
 
 def cpu_timer(func, *args, **kwargs):
     """
@@ -24,6 +23,7 @@ def gpu_timer(func, *args, **kwargs):
         + `func`: To-be-measured function
         + `args`, `kwargs`: Function arguments
     """
+    import cupy as cp   # imported here so this module works without a GPU
 
     start = cp.cuda.Event()
     end = cp.cuda.Event()
