@@ -29,10 +29,17 @@ def detect_platform():
         from numba import cuda
         info['has_cuda'] = cuda.is_available()
         if info['has_cuda']:
-            info['gpu_name'] = cuda.get_current_device().name.decode()
+            info['gpu_name'] = gpu_name()
     except Exception:
         pass
     return info
+
+
+def gpu_name():
+    """Device name as str — numba returns bytes on some versions, str on others."""
+    from numba import cuda
+    name = cuda.get_current_device().name
+    return name.decode() if isinstance(name, bytes) else name
 
 
 def available_models():

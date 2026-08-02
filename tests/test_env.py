@@ -39,7 +39,8 @@ def test_cuda_available():
     try:
         from numba import cuda
         if cuda.is_available():
-            print(f"CUDA available: {cuda.get_current_device().name.decode()}")
+            from pipeline import gpu_name
+            print(f"CUDA available: {gpu_name()}")
         else:
             print("CUDA not available (expected on macOS — "
                   "use NUMBA_ENABLE_CUDASIM=1 locally, Colab for real timings)")
