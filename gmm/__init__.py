@@ -8,10 +8,10 @@ from .cpu.GMM_cpu_numba_mog2 import GMM_CPU_NUMBA_MOG2
 try:
     from .gpu.GMM_cupy_v0 import GMM_CUPY_V0
     from .gpu.GMM_cupy_v1 import GMM_CUPY_V1
-except ImportError:                     # pragma: no cover - cupy not installed
+except Exception:                       # pragma: no cover - cupy missing or no GPU
     GMM_CUPY_V0 = GMM_CUPY_V1 = None
 
 try:
     from .gpu.GMM_cuda_mog2 import GMM_CUDA_MOG2
-except ImportError:                     # pragma: no cover - numba.cuda missing
+except Exception:                       # pragma: no cover - numba.cuda missing
     GMM_CUDA_MOG2 = None

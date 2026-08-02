@@ -1,13 +1,19 @@
+import os
+
 import numpy as np
 import cupy as cp
 
 from utils import gpu_timer
 from settings import INIT_VAR, REINIT_WEIGHT
 
-with open("gmm/gpu/kernels/update_kernel_cp_v1.cu", "r", encoding="utf-8") as f_update: 
+# Resolve the .cu files against this module, not the current working directory,
+# so importing gmm works from anywhere (notebooks/, tests/, ...).
+KERNEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernels")
+
+with open(os.path.join(KERNEL_DIR, "update_kernel_cp_v1.cu"), "r", encoding="utf-8") as f_update:
     UPDATE_KERNEL = f_update.read()
 
-with open("gmm/gpu/kernels/predict_kernel_cp_v1.cu", "r", encoding="utf-8") as f_predict: 
+with open(os.path.join(KERNEL_DIR, "predict_kernel_cp_v1.cu"), "r", encoding="utf-8") as f_predict:
     PREDICT_KERNEL = f_predict.read()
 
 
