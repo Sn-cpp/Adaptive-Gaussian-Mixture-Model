@@ -1,0 +1,16 @@
+name: gmm-blur
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - numpy
+  - numba
+  - jupyter
+  - matplotlib
+  - pandas
+  - tqdm
+  - pip
+  - pip:
+      - opencv-python
+      # - cupy-cuda12x   # only for the GMM_CUPY_* models

@@ -1,6 +1,11 @@
 numpy
 numba
 opencv-python
+matplotlib
 pandas
 tqdm
 pytest
+
+# Only needed for the GMM_CUPY_* models — pick the wheel matching your CUDA
+# runtime, e.g. cupy-cuda12x on Colab.
+# cupy-cuda12x
