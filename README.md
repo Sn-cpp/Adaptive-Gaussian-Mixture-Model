@@ -176,25 +176,28 @@ OpenCV at three learning rates.
 ## Measured results
 
 Google Colab, **Tesla T4** + 2 vCPU, `input.mp4`, full pipeline
-(model + morphology + separable blur + composite), median over 30 frames:
+(model + morphology + separable blur + composite) over 30 frames. A Colab T4 is
+shared hardware, so each figure below is the **median of 3 repeats**, not a
+single run — individual runs vary by up to ±10%.
 
 | Resolution | `GMM_CPU_MOG2` | `GMM_CPU_NUMBA_MOG2` | `GMM_CUDA_MOG2` | `GMM_CUDA_MOG2` streamed |
 |---|---|---|---|---|
-| 480p  | 0.30 FPS | 13.3 FPS | **371 FPS** | 410 FPS |
-| 720p  | 0.11 FPS |  4.3 FPS | **114 FPS** | 125 FPS |
-| 1080p | 0.05 FPS |  1.9 FPS | **40.2 FPS** | 37.6 FPS |
+| 480p  | 0.31 FPS | 13.2 FPS | 358 FPS | **376 FPS** |
+| 720p  | 0.10 FPS |  4.4 FPS | 103 FPS | **126 FPS** |
+| 1080p | 0.047 FPS |  1.9 FPS | 34.1 FPS | **37.0 FPS** |
 
-Speedup over the sequential Python reference at 1080p: 41× (Numba, 2 vCPU) and
-**877×** (CUDA). Streaming buys ~10% at 480p/720p but costs ~6% at 1080p, where
-compute already dominates and the extra pinned staging buffer does not pay for
-itself.
+Speedup over the sequential Python reference: 41× (Numba, 2 vCPU) and **732×**
+(CUDA) at 1080p; up to 1150× at 480p. Streaming helps at every resolution — most
+at 720p (+23%) — and it is also markedly more stable: across 5 repeats at 1080p
+the synchronous path ranged 30.2–38.1 FPS while the streamed path stayed within
+37.3–38.6.
 
 Blur at 1080p — separable + shared-memory tiled vs the naive 2D convolution:
-**22.6× faster on the T4** (1.56 ms vs 35.2 ms), 7.5× on CPU.
+**14.2× faster on the T4** (1.39 ms vs 20.4 ms, median of 5), 7.5× on CPU.
 
 ## Target
 
-Full HD (1920×1080) at >30 FPS on an NVIDIA T4 — met, at 40.2 FPS.
+Full HD (1920×1080) at >30 FPS on an NVIDIA T4 — met, at 34–37 FPS.
 
 ## Authors
 
