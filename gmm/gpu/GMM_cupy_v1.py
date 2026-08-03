@@ -27,7 +27,8 @@ class GMM_CUPY_V1(MOG2Base):
         self.d_modes = cp.asarray(self.modes)
         self.d_mask = cp.asarray(self.mask)
 
-        self.num_pixels = np.int32(self.height * self.width)
+        self.height = np.int32(self.height)
+        self.width = np.int32(self.width)
         self.n_channels = np.int32(self.n_channels)
         self.n_comps = np.int32(self.n_comps)
 
@@ -46,7 +47,7 @@ class GMM_CUPY_V1(MOG2Base):
             self.d_modes,
             self.d_mask,
             FLT_EPSILON,
-            self.num_pixels, self.n_channels, self.n_comps,
+            self.height, self.width, self.n_channels, self.n_comps,
             *args
         ))
         return self.d_mask

@@ -1,4 +1,4 @@
-#define dData_MAX 3
+#define N_CHANNELs 3
 
 __device__ bool detect_shadow(
     const int i,
@@ -58,7 +58,7 @@ extern "C" __global__ void step_gmm(
     unsigned char* modes,
     unsigned char* mask,
     const float FLT_EPS,
-    const int num_pixels, const int C, const int K,
+    const int H, const int W, const int C, const int K,
     const float alpha,
     const float prune,
     const float Tb,
@@ -71,169 +71,178 @@ extern "C" __global__ void step_gmm(
     const unsigned char shadow_val,
     const bool detect_shadows) {
         // Thread coordinating values
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        int stride = blockDim.x * gridDim.x;
+        int x = blockIdx.x * blockDim.x + threadIdx.x;
+        int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+        int stride_x = blockDim.x * gridDim.x;
+        int stride_y = blockDim.y * gridDim.y;
 
         // Pre-computed constant
+        int num_pixels = H * W;
         float alpha1 = 1.0 - alpha;
 
         // Local buffer
-        float dData[dData_MAX];
+        float dData[N_CHANNELs];
+        float pData[N_CHANNELs];
 
-        for (int i = idx; i < num_pixels; i += stride) {
-            bool background = false;
-            bool fit_pdf = false;
-            unsigned char nmodes = modes[i];
+        for (int yy = y; yy < H; yy += stride_y)
+            for (int xx = x; xx < W; xx += stride_x) {
+                int i = yy * W + xx;
+                bool background = false;
+                bool fit_pdf = false;
+                unsigned char nmodes = modes[i];
+                
+                for (int c = 0; c < C; c++) {
+                    long long frame_idx = (long long) (c*num_pixels + i);
+                    pData[c] = frame[frame_idx];
+                }
 
-            float total_weight = 0.0;
 
-            for (int mode = 0; mode < nmodes; mode++) {
-                long long w_v_idx = (long long) (mode*num_pixels + i);
-                float weight = alpha1 * weights[w_v_idx] + prune;
-                int swap_count = 0;
+                float total_weight = 0.0;
+                for (int mode = 0; mode < nmodes; mode++) {
+                    long long w_v_idx = (long long) (mode*num_pixels + i);
+                    float weight = alpha1 * weights[w_v_idx] + prune;
+                    int swap_count = 0;
 
-                if (!fit_pdf) {
-                    float var = vars_[w_v_idx];
-                    float dist2 = 0.0;
-
-                    for (int c = 0; c < C; c++) {
-                        long long frame_idx = (long long) (c*num_pixels + i);
-                        long long mean_idx = (long long) ((mode*C + c)*num_pixels + i);
-
-                        float diff = means[mean_idx] - frame[frame_idx];
-                        dData[c] = diff;
-                        dist2 += diff * diff;
-                    }
-
-                    if ((total_weight < TB) && (dist2 < Tb * var)) {
-                        background = true;
-                    }
-
-                    if (dist2 < Tg * var) {
-                        fit_pdf = true;
-                        weight += alpha;
-                        float k = alpha / weight;
+                    if (!fit_pdf) {
+                        float var = vars_[w_v_idx];
+                        float dist2 = 0.0;
 
                         for (int c = 0; c < C; c++) {
                             long long mean_idx = (long long) ((mode*C + c)*num_pixels + i);
-                            means[mean_idx] -= k * dData[c];
+                            float diff = means[mean_idx] - pData[c];
+                            dData[c] = diff;
+                            dist2 += diff * diff;
                         }
-                        
-                        float varnew = var + k*(dist2 - var);
-                        varnew = max(varnew, var_min);
-                        varnew = min(varnew, var_max);
-                        vars_[w_v_idx] = varnew;
-                        
-                        float temp = 0.0;
-                        for (int u = mode; u > 0; u--) {
-                            long long w_v_prev_idx = (long long) ((u-1)*num_pixels + i);
-                            if (weight < weights[w_v_prev_idx])
-                                break;
-                            swap_count += 1;
 
-                            long long w_v_cur_idx = (long long) (u*num_pixels + i);
+                        if ((total_weight < TB) && (dist2 < Tb * var)) {
+                            background = true;
+                        }
 
-                            temp = weights[w_v_cur_idx];
-                            weights[w_v_cur_idx] = weights[w_v_prev_idx];
-                            weights[w_v_prev_idx] = temp;
-                            
-                            temp = vars_[w_v_cur_idx];
-                            vars_[w_v_cur_idx] = vars_[w_v_prev_idx];
-                            vars_[w_v_prev_idx] = temp;
+                        if (dist2 < Tg * var) {
+                            fit_pdf = true;
+                            weight += alpha;
+                            float k = alpha / weight;
 
                             for (int c = 0; c < C; c++) {
-                                long long mean_cur_idx = (long long) ((u*C + c)*num_pixels + i);
-                                long long mean_prev_idx = (long long) (((u-1)*C + c)*num_pixels + i);
-
-                                temp = means[mean_cur_idx];
-                                means[mean_cur_idx] = means[mean_prev_idx];
-                                means[mean_prev_idx] = temp;
+                                long long mean_idx = (long long) ((mode*C + c)*num_pixels + i);
+                                means[mean_idx] -= k * dData[c];
                             }
+                            
+                            float varnew = var + k*(dist2 - var);
+                            varnew = max(varnew, var_min);
+                            varnew = min(varnew, var_max);
+                            vars_[w_v_idx] = varnew;
+                            
+                            float temp = 0.0;
+                            for (int u = mode; u > 0; u--) {
+                                long long w_v_prev_idx = (long long) ((u-1)*num_pixels + i);
+                                if (weight < weights[w_v_prev_idx])
+                                    break;
+                                swap_count += 1;
+
+                                long long w_v_cur_idx = (long long) (u*num_pixels + i);
+
+                                temp = weights[w_v_cur_idx];
+                                weights[w_v_cur_idx] = weights[w_v_prev_idx];
+                                weights[w_v_prev_idx] = temp;
+                                
+                                temp = vars_[w_v_cur_idx];
+                                vars_[w_v_cur_idx] = vars_[w_v_prev_idx];
+                                vars_[w_v_prev_idx] = temp;
+
+                                for (int c = 0; c < C; c++) {
+                                    long long mean_cur_idx = (long long) ((u*C + c)*num_pixels + i);
+                                    long long mean_prev_idx = (long long) (((u-1)*C + c)*num_pixels + i);
+
+                                    temp = means[mean_cur_idx];
+                                    means[mean_cur_idx] = means[mean_prev_idx];
+                                    means[mean_prev_idx] = temp;
+                                }
+                            }
+                        }
+
+                    }
+                
+                    if (weight < -prune) {
+                        // weight = 0.0;
+                        // nmodes -= 1;
+                    }
+
+                    weights[(long long) ((mode-swap_count)*num_pixels + i)] = weight;
+                    total_weight += weight;
+                }
+
+                float inv_weight = 0.0;
+                if (fabsf(total_weight) > FLT_EPS)
+                    inv_weight = 1.0 / total_weight;
+
+                for (int mode = 0; mode < nmodes; mode++) {
+                    long long w_idx = (long long) (mode*num_pixels + i);
+                    weights[w_idx] *= inv_weight;
+                }
+
+                if (!fit_pdf && alpha > 0.0) {
+                    int mode = 0;
+                    if (nmodes == K) {
+                        mode = K - 1;
+                    } else {
+                        mode = nmodes;
+                        nmodes += 1;
+                    }
+
+                    if (nmodes == 1) {
+                        weights[(long long) (mode*num_pixels + i)] = 1.0;
+                    } else {
+                        weights[(long long) (mode*num_pixels + i)] = alpha;
+                        for (int m = 0; m < nmodes - 1; m++) {
+                            weights[(long long) (m*num_pixels + i)] *= alpha1;
                         }
                     }
 
-                }
-            
-                if (weight < -prune) {
-                    weight = 0.0;
-                    nmodes -= 1;
-                }
-
-                weights[(long long) ((mode-swap_count)*num_pixels + i)] = weight;
-                total_weight += weight;
-            }
-
-            float inv_weight = 0.0;
-            if (fabsf(total_weight) > FLT_EPS)
-                inv_weight = 1.0 / total_weight;
-
-            for (int mode = 0; mode < nmodes; mode++) {
-                long long w_idx = (long long) (mode*num_pixels + i);
-                weights[w_idx] *= inv_weight;
-            }
-
-            if (!fit_pdf && alpha > 0.0) {
-                int mode = 0;
-                if (nmodes == K) {
-                    mode = K - 1;
-                } else {
-                    mode = nmodes;
-                    nmodes += 1;
-                }
-
-                if (nmodes == 1) {
-                    weights[(long long) (mode*num_pixels + i)] = 1.0;
-                } else {
-                    weights[(long long) (mode*num_pixels + i)] = alpha;
-                    for (int m = 0; m < nmodes - 1; m++) {
-                        weights[(long long) (m*num_pixels + i)] *= alpha1;
-                    }
-                }
-
-                for (int c = 0; c < C; c++) {
-                    long long mean_idx = (long long) ((mode*C + c)*num_pixels + i);   
-                    long long frame_idx = (long long) (c*num_pixels + i);
-
-                    means[mean_idx] = frame[frame_idx];
-                }
-
-                vars_[(long long) (mode*num_pixels + i)] = var_init;
-
-                float temp = 0.0;
-                for (int u = nmodes - 1; u > 0; u--) {
-                    long long w_v_prev_idx = (long long) ((u-1)*num_pixels + i);
-                    if (alpha < weights[w_v_prev_idx])
-                        break;
-
-                    long long w_v_cur_idx = (long long) (u*num_pixels + i);
-
-                    temp = weights[w_v_cur_idx];
-                    weights[w_v_cur_idx] = weights[w_v_prev_idx];
-                    weights[w_v_prev_idx] = temp;
-                    
-                    temp = vars_[w_v_cur_idx];
-                    vars_[w_v_cur_idx] = vars_[w_v_prev_idx];
-                    vars_[w_v_prev_idx] = temp;
-
                     for (int c = 0; c < C; c++) {
-                        long long mean_cur_idx = (long long) ((u*C + c)*num_pixels + i);
-                        long long mean_prev_idx = (long long) (((u-1)*C + c)*num_pixels + i);
+                        long long mean_idx = (long long) ((mode*C + c)*num_pixels + i);   
+                        means[mean_idx] = pData[c];
+                    }
 
-                        temp = means[mean_cur_idx];
-                        means[mean_cur_idx] = means[mean_prev_idx];
-                        means[mean_prev_idx] = temp;
+                    vars_[(long long) (mode*num_pixels + i)] = var_init;
+
+                    float temp = 0.0;
+                    for (int u = nmodes - 1; u > 0; u--) {
+                        long long w_v_prev_idx = (long long) ((u-1)*num_pixels + i);
+                        if (alpha < weights[w_v_prev_idx])
+                            break;
+
+                        long long w_v_cur_idx = (long long) (u*num_pixels + i);
+
+                        temp = weights[w_v_cur_idx];
+                        weights[w_v_cur_idx] = weights[w_v_prev_idx];
+                        weights[w_v_prev_idx] = temp;
+                        
+                        temp = vars_[w_v_cur_idx];
+                        vars_[w_v_cur_idx] = vars_[w_v_prev_idx];
+                        vars_[w_v_prev_idx] = temp;
+
+                        for (int c = 0; c < C; c++) {
+                            long long mean_cur_idx = (long long) ((u*C + c)*num_pixels + i);
+                            long long mean_prev_idx = (long long) (((u-1)*C + c)*num_pixels + i);
+
+                            temp = means[mean_cur_idx];
+                            means[mean_cur_idx] = means[mean_prev_idx];
+                            means[mean_prev_idx] = temp;
+                        }
                     }
                 }
-            }
-            
-            modes[i] = nmodes;
+                
+                modes[i] = nmodes;
 
-            if (background) {
-                mask[i] = 0;
-            } else if (detect_shadows && detect_shadow(i, nmodes, frame, weights, means, vars_, Tb, TB, tau, num_pixels, C)) {
-                mask[i] = shadow_val;
-            } else {
-                mask[i] = 255;
+                if (background) {
+                    mask[i] = 0;
+                } else if (detect_shadows && detect_shadow(i, nmodes, frame, weights, means, vars_, Tb, TB, tau, num_pixels, C)) {
+                    mask[i] = shadow_val;
+                } else {
+                    mask[i] = 255;
+                }
             }
-        }
+        
     }
