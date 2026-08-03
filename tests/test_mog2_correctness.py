@@ -37,7 +37,7 @@ def synthetic_sequence(n=30, H=48, W=64, seed=0):
 
 def run_model(model_cls, frames, color, **kw):
     model = model_cls(frames[0], n_components=MOG2_N_COMPONENTS, color=color, **kw)
-    masks = [model.step(to_planar(f, color)).copy() for f in frames]
+    masks = [model.step(to_planar(f, color))[0].copy() for f in frames]
     if hasattr(model, 'sync_state'):
         model.sync_state()
     return masks, model
@@ -104,9 +104,9 @@ def test_opencv_parity_real_video():
     Budget: 0.05% of pixels.
     """
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-    path = os.path.join(root, 'test_video.mp4')
+    path = os.path.join(root, 'input.mp4')
     if not os.path.exists(path):
-        print("  test_video.mp4 not found — skipped")
+        print("  input.mp4 not found — skipped")
         return
 
     cap = cv2.VideoCapture(path)
@@ -221,7 +221,7 @@ def test_stationary_object_persists():
         model = GMM_CPU_NUMBA_MOG2(bg, n_components=MOG2_N_COMPONENTS,
                                    detect_shadows=False)
         n_ours = _absorption_frames(
-            lambda f: model.step(to_planar(f), alpha), bg, obj, box)
+            lambda f: model.step(to_planar(f), None, alpha)[0], bg, obj, box)
 
         theory = math.log(MOG2_BACKGROUND_RATIO) / math.log(1 - alpha)
         print(f"  alpha={alpha:.4f}: ours={n_ours} opencv={n_cv} "
@@ -231,7 +231,7 @@ def test_stationary_object_persists():
 
     # keep showing the object: it must eventually become *the* background
     for _ in range(2000):
-        model.step(to_planar(obj), alpha)
+        model.step(to_planar(obj), None, alpha)
     learned = model.background_image()[box].mean()
     print(f"  learned background inside the box = {learned:.1f} (object = 230)")
     assert learned > 200, f"background model did not absorb the object ({learned:.1f})"

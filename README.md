@@ -61,8 +61,8 @@ python tests/test_env.py
 python main.py
 ```
 
-Edit `model_choice` in `main.py` to select the backend
-(0=CPU, 1=Numba, 2=CuPy V0, 3=CuPy V1, 4=MOG2 CPU, 5=MOG2 Numba, 6=MOG2 CUDA).
+Select the backend via `--model` (0=CPU, 1=Numba, 2=CuPy V0, 3=CuPy V1, 4=MOG2 CPU, 5=MOG2 Numba,
+6=MOG2 CUDA); see `python main.py --help`.
 
 Stauffer-Grimson defaults: `K=7`, `match_threshold=3.5`, `bg_threshold=0.7`,
 `alpha=0.01`. MOG2 defaults match OpenCV and live in `settings.py`.
@@ -83,8 +83,14 @@ The model on its own:
 ```python
 from gmm.mog2_common import to_planar
 model = GMM_CPU_NUMBA_MOG2(first_frame, n_components=5)
-mask = model.step(to_planar(frame_bgr))     # planar (C, H, W) float32
+mask, seconds = model.step(to_planar(frame_bgr))   # planar (C, H, W) float32
 ```
+
+`step(frame, match_threshold, update_alpha, weight_threshold) -> (mask, seconds)`
+is the same signature every other model uses, so `main.py` and `benchmark.py`
+drive them all identically. MOG2 accepts and ignores `match_threshold` /
+`weight_threshold` — its `Tb` / `Tg` / `TB` come from `settings.MOG2_*`,
+calibrated to reproduce OpenCV; override them via the constructor.
 
 Knobs: `color=False` (1-channel grayscale model instead of 3-channel),
 `detect_shadows`, `var_threshold`, `background_ratio`, and `update_alpha` on
@@ -169,7 +175,7 @@ OpenCV at three learning rates.
 
 ## Measured results
 
-Google Colab, **Tesla T4** + 2 vCPU, `test_video.mp4`, full pipeline
+Google Colab, **Tesla T4** + 2 vCPU, `input.mp4`, full pipeline
 (model + morphology + separable blur + composite), median over 30 frames:
 
 | Resolution | `GMM_CPU_MOG2` | `GMM_CPU_NUMBA_MOG2` | `GMM_CUDA_MOG2` | `GMM_CUDA_MOG2` streamed |

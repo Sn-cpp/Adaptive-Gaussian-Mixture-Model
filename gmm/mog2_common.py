@@ -12,6 +12,8 @@ the rest of the project uses:
 
 Frames are planar too, `(C, H, W)` float32, exactly like `GMM_CPU`.
 """
+from time import perf_counter
+
 import cv2
 import numpy as np
 
@@ -148,15 +150,25 @@ class MOG2Base:
         self.alpha = learning_rate(update_alpha, self.nframes, self.history)
         return kernel_args(self.alpha, **self._params)
 
-    def step(self, frame, update_alpha=-1.0):
-        """One MOG2 pass over a planar (C, H, W) float32 frame -> uint8 mask.
+    def step(self, frame, match_threshold=None, update_alpha=-1.0,
+             weight_threshold=None):
+        """One MOG2 pass over a planar (C, H, W) float32 frame -> (mask, seconds).
 
-        Update and classification are a single fused traversal in MOG2, so
-        unlike `GMM_CPU` this model exposes `step` rather than separate
-        `predict` / `update` calls.
+        Same signature and return shape as `GMM_CPU.step` and friends, so every
+        model in `gmm` can be driven identically by `main.py` and `benchmark.py`.
+
+        MOG2 does classification and update in a single fused traversal, so
+        there is no separate `predict` / `update` pair here.
+
+        `match_threshold` and `weight_threshold` are accepted for interface
+        compatibility and deliberately ignored: MOG2 uses its own `Tb` / `Tg` /
+        `TB` (`settings.MOG2_*`), which are calibrated to reproduce OpenCV.
+        Override them per instance via the constructor instead. A negative
+        `update_alpha` selects OpenCV's ramp `1/min(2*nframes, history)`.
         """
+        t0 = perf_counter()
         self._step_kernel(frame, self.next_args(update_alpha))
-        return self.mask
+        return self.mask, perf_counter() - t0
 
     def background_image(self):
         return background_image(self.means, self.vars, self.weights, self.modes,
