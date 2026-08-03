@@ -4,6 +4,10 @@ INIT_VAR = np.float32(15.0)
 REINIT_WEIGHT = np.float32(0.01)
 MAX_COMPONENTS = 20
 
+# Squared distance below which GMM_CPU_NUMBA reuses a component instead of
+# generating a new one. Was hard-coded as 9.0 at debug.py's call site.
+COMP_GEN_THRESHOLD = np.float32(9.0)
+
 # ------------------------------------------------------------------------------
 # MOG2 model parameters (Zivkovic 2004).
 # These mirror the OpenCV `BackgroundSubtractorMOG2` defaults exactly, so the

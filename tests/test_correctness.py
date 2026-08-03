@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from gmm import GMM_CPU, GMM_CPU_NUMBA
+from settings import COMP_GEN_THRESHOLD
 
 requires_cupy = pytest.mark.skipif(
     not _CUPY_REAL,
@@ -32,6 +33,23 @@ requires_cupy = pytest.mark.skipif(
 MASK_TOL_CPU = 0.01
 MASK_TOL_NUMBA_PAR = 0.02
 MASK_TOL_GPU = 0.03
+
+
+def call_update(model, frame, mask, diff_square_sum, match_threshold, update_alpha):
+    """`update()` differs between backends — pass each one only what it accepts.
+
+    GMM_CPU and GMM_CPU_NUMBA take the predicted `mask`; the CuPy models do not,
+    and GMM_CPU_NUMBA additionally takes `comp_gen_threshold`.
+    """
+    import inspect
+    params = inspect.signature(model.update).parameters
+    kwargs = {'frame': frame, 'diff_square_sum': diff_square_sum,
+              'match_threshold': match_threshold, 'update_alpha': update_alpha}
+    if 'mask' in params:
+        kwargs['mask'] = mask
+    if 'comp_gen_threshold' in params:
+        kwargs['comp_gen_threshold'] = COMP_GEN_THRESHOLD
+    return model.update(**kwargs)
 
 
 def make_test_frames(H, W, n_frames=10, seed=42):
@@ -149,9 +167,9 @@ class TestCpuVsNumbaSerial:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask_cpu, dsq_cpu = cpu.predict(fp.copy(), mt, bt)
-            cpu.update(fp.copy(), dsq_cpu, mt, alpha)
+            call_update(cpu, fp.copy(), mask_cpu, dsq_cpu, mt, alpha)
             mask_numba, dsq_numba = numba.predict(fp.copy(), mt, bt)
-            numba.update(fp.copy(), dsq_numba, mt, alpha)
+            call_update(numba, fp.copy(), mask_numba, dsq_numba, mt, alpha)
 
         ok, diff = compare_masks(mask_cpu, mask_numba, MASK_TOL_CPU)
         assert ok, f"After 10 frames, mask diff {diff:.4f} exceeds {MASK_TOL_CPU}"
@@ -169,7 +187,7 @@ class TestCpuVsNumbaSerial:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask, dsq = model.predict(fp.copy(), mt, bt)
-            model.update(fp.copy(), dsq, mt, alpha)
+            call_update(model, fp.copy(), mask, dsq, mt, alpha)
 
         sums = model.weights.sum(axis=0)
         assert np.allclose(sums, 1.0, atol=1e-5), \
@@ -188,7 +206,7 @@ class TestCpuVsNumbaSerial:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask, dsq = model.predict(fp.copy(), mt, bt)
-            model.update(fp.copy(), dsq, mt, alpha)
+            call_update(model, fp.copy(), mask, dsq, mt, alpha)
 
         sums = model.weights.sum(axis=0)
         assert np.allclose(sums, 1.0, atol=1e-5), \
@@ -234,9 +252,9 @@ class TestCpuVsNumbaParallel:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask_cpu, dsq_cpu = cpu.predict(fp.copy(), mt, bt)
-            cpu.update(fp.copy(), dsq_cpu, mt, alpha)
+            call_update(cpu, fp.copy(), mask_cpu, dsq_cpu, mt, alpha)
             mask_par, dsq_par = numba_par.predict(fp.copy(), mt, bt)
-            numba_par.update(fp.copy(), dsq_par, mt, alpha)
+            call_update(numba_par, fp.copy(), mask_par, dsq_par, mt, alpha)
 
         ok, diff = compare_masks(mask_cpu, mask_par, MASK_TOL_NUMBA_PAR)
         assert ok, f"After 10 frames, mask diff {diff:.4f} exceeds {MASK_TOL_NUMBA_PAR}"
@@ -255,9 +273,9 @@ class TestCpuVsNumbaParallel:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask_s, dsq_s = serial.predict(fp.copy(), mt, bt)
-            serial.update(fp.copy(), dsq_s, mt, alpha)
+            call_update(serial, fp.copy(), mask_s, dsq_s, mt, alpha)
             mask_p, dsq_p = par.predict(fp.copy(), mt, bt)
-            par.update(fp.copy(), dsq_p, mt, alpha)
+            call_update(par, fp.copy(), mask_p, dsq_p, mt, alpha)
 
         ok, diff = compare_masks(mask_s, mask_p, MASK_TOL_CPU)
         assert ok, f"Serial vs parallel Numba diff {diff:.4f} exceeds {MASK_TOL_CPU}"
@@ -275,7 +293,7 @@ class TestCpuVsNumbaParallel:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask, dsq = model.predict(fp.copy(), mt, bt)
-            model.update(fp.copy(), dsq, mt, alpha)
+            call_update(model, fp.copy(), mask, dsq, mt, alpha)
 
         sums = model.weights.sum(axis=0)
         assert np.allclose(sums, 1.0, atol=1e-5), \
@@ -306,10 +324,10 @@ class TestGpuCupyV0:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask_cpu, dsq_cpu = cpu.predict(fp.copy(), mt, bt)
-            cpu.update(fp.copy(), dsq_cpu, mt, alpha)
+            call_update(cpu, fp.copy(), mask_cpu, dsq_cpu, mt, alpha)
             fp_gpu = cp.asarray(fp)
             mask_gpu, dsq_gpu = gpu.predict(fp_gpu, mt, bt)
-            gpu.update(fp_gpu, dsq_gpu, mt, alpha)
+            call_update(gpu, fp_gpu, mask_gpu, dsq_gpu, mt, alpha)
 
         mask_gpu_np = cp.asnumpy(mask_gpu)
         ok, diff = compare_masks(mask_cpu, mask_gpu_np, MASK_TOL_GPU)
@@ -331,7 +349,7 @@ class TestGpuCupyV0:
         for frame in frames[1:]:
             fp_gpu = cp.asarray(to_planar(frame))
             mask, dsq = model.predict(fp_gpu, mt, bt)
-            model.update(fp_gpu, dsq, mt, alpha)
+            call_update(model, fp_gpu, mask, dsq, mt, alpha)
 
         sums = cp.asnumpy(model.weights.sum(axis=0))
         assert np.allclose(sums, 1.0, atol=1e-4), "CuPy V0 weight sums deviate"
@@ -357,10 +375,10 @@ class TestGpuCupyV1:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask_cpu, dsq_cpu = cpu.predict(fp.copy(), mt, bt)
-            cpu.update(fp.copy(), dsq_cpu, mt, alpha)
+            call_update(cpu, fp.copy(), mask_cpu, dsq_cpu, mt, alpha)
             fp_gpu = cp.asarray(fp)
             mask_gpu, dsq_gpu = gpu.predict(fp_gpu, mt, bt)
-            gpu.update(fp_gpu, dsq_gpu, mt, alpha)
+            call_update(gpu, fp_gpu, mask_gpu, dsq_gpu, mt, alpha)
 
         mask_gpu_np = cp.asnumpy(mask_gpu)
         ok, diff = compare_masks(mask_cpu, mask_gpu_np, MASK_TOL_GPU)
@@ -383,9 +401,9 @@ class TestGpuCupyV1:
         for frame in frames[1:]:
             fp_gpu = cp.asarray(to_planar(frame))
             mask_v0, dsq_v0 = v0.predict(fp_gpu.copy(), mt, bt)
-            v0.update(fp_gpu.copy(), dsq_v0, mt, alpha)
+            call_update(v0, fp_gpu.copy(), mask_v0, dsq_v0, mt, alpha)
             mask_v1, dsq_v1 = v1.predict(fp_gpu.copy(), mt, bt)
-            v1.update(fp_gpu.copy(), dsq_v1, mt, alpha)
+            call_update(v1, fp_gpu.copy(), mask_v1, dsq_v1, mt, alpha)
 
         mask_v0_np = cp.asnumpy(mask_v0)
         mask_v1_np = cp.asnumpy(mask_v1)
@@ -443,7 +461,7 @@ class TestEdgeCases:
 
         fp = to_planar(first)
         mask, dsq = model.predict(fp, mt, bt)
-        model.update(fp, dsq, mt, alpha)
+        call_update(model, fp, mask, dsq, mt, alpha)
 
         assert mask.shape == (1, 1)
         assert model.weights.shape == (K, 1, 1)
@@ -462,7 +480,7 @@ class TestEdgeCases:
         fp = to_planar(static)
         for _ in range(30):
             mask, dsq = model.predict(fp.copy(), mt, bt)
-            model.update(fp.copy(), dsq, mt, alpha)
+            call_update(model, fp.copy(), mask, dsq, mt, alpha)
 
         fg_ratio = np.count_nonzero(mask) / mask.size
         assert fg_ratio < 0.01, \
@@ -514,9 +532,9 @@ class TestPerFrameDivergence:
         for frame in frames[1:]:
             fp = to_planar(frame)
             mask_cpu, dsq_cpu = cpu.predict(fp.copy(), mt, bt)
-            cpu.update(fp.copy(), dsq_cpu, mt, alpha)
+            call_update(cpu, fp.copy(), mask_cpu, dsq_cpu, mt, alpha)
             mask_numba, dsq_numba = numba.predict(fp.copy(), mt, bt)
-            numba.update(fp.copy(), dsq_numba, mt, alpha)
+            call_update(numba, fp.copy(), mask_numba, dsq_numba, mt, alpha)
             _, diff = compare_masks(mask_cpu, mask_numba, 1.0)
             max_diff = max(max_diff, diff)
 

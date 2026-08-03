@@ -151,7 +151,7 @@ class MOG2Base:
         return kernel_args(self.alpha, **self._params)
 
     def step(self, frame, match_threshold=None, update_alpha=-1.0,
-             weight_threshold=None):
+             weight_threshold=None, comp_gen_threshold=None):
         """One MOG2 pass over a planar (C, H, W) float32 frame -> (mask, seconds).
 
         Same signature and return shape as `GMM_CPU.step` and friends, so every
@@ -160,11 +160,11 @@ class MOG2Base:
         MOG2 does classification and update in a single fused traversal, so
         there is no separate `predict` / `update` pair here.
 
-        `match_threshold` and `weight_threshold` are accepted for interface
-        compatibility and deliberately ignored: MOG2 uses its own `Tb` / `Tg` /
-        `TB` (`settings.MOG2_*`), which are calibrated to reproduce OpenCV.
-        Override them per instance via the constructor instead. A negative
-        `update_alpha` selects OpenCV's ramp `1/min(2*nframes, history)`.
+        `match_threshold`, `weight_threshold` and `comp_gen_threshold` are
+        accepted for interface compatibility and deliberately ignored: MOG2 uses
+        its own `Tb` / `Tg` / `TB` (`settings.MOG2_*`), calibrated to reproduce
+        OpenCV. Override them per instance via the constructor instead. A
+        negative `update_alpha` selects OpenCV's ramp `1/min(2*nframes, history)`.
         """
         t0 = perf_counter()
         self._step_kernel(frame, self.next_args(update_alpha))

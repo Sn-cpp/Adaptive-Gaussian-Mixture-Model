@@ -2,7 +2,7 @@ import numpy as np
 from numba import njit, prange
 from utils import cpu_timer
 
-from settings import INIT_VAR, REINIT_WEIGHT
+from settings import INIT_VAR, REINIT_WEIGHT, COMP_GEN_THRESHOLD
 
 
 @njit(cache=True, parallel=True)
@@ -91,7 +91,7 @@ def update_numba_parallel(frame: np.ndarray, mask: np.ndarray, diff_square_sum: 
 def predict_numba_parallel(frame: np.ndarray, match_threshold: float, weight_threshold: float,
                   k_comps: int, means: np.ndarray, vars: np.ndarray, weights: np.ndarray):
     
-    diff_square_sum = np.zeros(shape=(k_comps, frame.shape[1], frame.shape[2]))
+    diff_square_sum = np.zeros(shape=(k_comps, frame.shape[1], frame.shape[2]), dtype=np.float32)
     foreground_mask = np.zeros(shape=(frame.shape[1], frame.shape[2]), dtype=np.uint8)
     sqr_match = match_threshold ** 2
     
@@ -132,10 +132,15 @@ def predict_numba_parallel(frame: np.ndarray, match_threshold: float, weight_thr
             for k in range(k_comps):
                 idx = order[k]
                 cumulative_weight += weights[idx, i, j]
-                
-                if cumulative_weight > weight_threshold:
+
+                # The highest-ranked component is always part of the background,
+                # mirroring `background_components[0] = True` in GMM_CPU. Without
+                # this guard the first component (weight 1.0 right after init)
+                # already exceeds the threshold, the loop breaks before testing
+                # `matches`, and every pixel comes out as foreground.
+                if k > 0 and cumulative_weight > weight_threshold:
                     break
-                
+
                 if matches[idx]:
                     is_background = True
                     break
@@ -144,15 +149,23 @@ def predict_numba_parallel(frame: np.ndarray, match_threshold: float, weight_thr
 
     return foreground_mask, diff_square_sum
 
+# Serial builds of the same two kernels: njit compiles `.py_func` again with
+# parallel disabled, so `prange` degrades to `range`.
+update_numba_serial = njit(cache=True)(update_numba_parallel.py_func)
+predict_numba_serial = njit(cache=True)(predict_numba_parallel.py_func)
+
+
 class GMM_CPU_NUMBA:
     def __init__(self, first_frame: np.ndarray, n_components: int, parallel=False, *arg, **kwargs):
 
         if parallel:
             self.update_func = update_numba_parallel
             self.predict_func = predict_numba_parallel
-        # else:
-        #     self.update_func = update_numba
-        #     self.predict_func = predict_numba
+        else:
+            # Same kernel source, compiled without prange, so parallel=False is
+            # a genuine serial baseline rather than an alias of the parallel one.
+            self.update_func = update_numba_serial
+            self.predict_func = predict_numba_serial
         
         self.height, self.width, _ = first_frame.shape
         
@@ -177,7 +190,7 @@ class GMM_CPU_NUMBA:
         
         return mask, diff_square_sum
 
-    def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32, comp_gen_threshold: np.float32):
+    def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32, comp_gen_threshold: np.float32 = COMP_GEN_THRESHOLD):
         # Predict step 
         (mask, diff_square_sum), predict_cost = cpu_timer(self.predict, frame=frame, match_threshold=match_threshold, weight_threshold=weight_threshold)
 

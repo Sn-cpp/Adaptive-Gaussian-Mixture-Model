@@ -101,7 +101,7 @@ class GMM_CUPY_V0:
 
         return foreground_mask, diff_square_sum
 
-    def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32):
+    def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32, comp_gen_threshold: np.float32 = None):
         # Predict step 
         (mask, diff_square_sum), predict_cost = gpu_timer(self.predict, frame=frame, match_threshold=match_threshold, weight_threshold=weight_threshold)
 
