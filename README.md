@@ -177,8 +177,10 @@ OpenCV at three learning rates.
 
 Google Colab, **Tesla T4** + 2 vCPU, `input.mp4`, full pipeline
 (model + morphology + separable blur + composite) over 30 frames. A Colab T4 is
-shared hardware, so each figure below is the **median of 3 repeats**, not a
-single run — individual runs vary by up to ±10%.
+shared hardware and the spread is large: across 11 separate 1080p measurements
+the CUDA path ranged **30.2 to 45.0 FPS**. Every figure below is therefore the
+**median of repeated runs**, never a single one — treat any single benchmark
+from this notebook as ±20%.
 
 | Resolution | `GMM_CPU_MOG2` | `GMM_CPU_NUMBA_MOG2` | `GMM_CUDA_MOG2` | `GMM_CUDA_MOG2` streamed |
 |---|---|---|---|---|
@@ -193,11 +195,14 @@ the synchronous path ranged 30.2–38.1 FPS while the streamed path stayed withi
 37.3–38.6.
 
 Blur at 1080p — separable + shared-memory tiled vs the naive 2D convolution:
-**14.2× faster on the T4** (1.39 ms vs 20.4 ms, median of 5), 7.5× on CPU.
+**14.2× faster on the T4** (1.39 ms vs 20.4 ms, median of 5; observed 13.3–24.4×
+across sessions — the separable pass is stable at ~1.4 ms, the naive 2D kernel is
+what fluctuates), 7.5× on CPU.
 
 ## Target
 
-Full HD (1920×1080) at >30 FPS on an NVIDIA T4 — met, at 34–37 FPS.
+Full HD (1920×1080) at >30 FPS on an NVIDIA T4 — met. Median 34 FPS
+synchronous, 37 FPS streamed; the slowest of 11 measured runs was 30.2 FPS.
 
 ## Authors
 
