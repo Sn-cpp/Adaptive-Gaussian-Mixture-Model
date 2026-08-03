@@ -3,75 +3,70 @@ import os
 import numpy as np
 import cupy as cp
 
-from utils import gpu_timer
-from settings import INIT_VAR, REINIT_WEIGHT
+from settings import FLT_EPSILON
+from gmm.mog2_common import MOG2Base
 
 # Resolve the .cu files against this module, not the current working directory,
 # so importing gmm works from anywhere (notebooks/, tests/, ...).
 KERNEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernels")
 
-with open(os.path.join(KERNEL_DIR, "update_kernel_cp_v1.cu"), "r", encoding="utf-8") as f_update:
-    UPDATE_KERNEL = f_update.read()
+with open(os.path.join(KERNEL_DIR, "step_kernel_cp_v1.cu"), "r", encoding="utf-8") as f_update:
+    STEP_KERNEL = f_update.read()
 
-with open(os.path.join(KERNEL_DIR, "predict_kernel_cp_v1.cu"), "r", encoding="utf-8") as f_predict:
-    PREDICT_KERNEL = f_predict.read()
+TILE_X = 32
+TILE_Y = 8
+MAX_C = 3
 
+class GMM_CUPY_V1(MOG2Base):
+    def __init__(self, first_frame: np.ndarray, n_components: int, *arg, **kwargs):
+        super().__init__(first_frame, n_components, *arg, **kwargs)
 
-class GMM_CUPY_V1:
-    def __init__(self, first_frame: np.ndarray, n_components: int, block_size: int=256, *arg, **kwargs):        
-        self.height, self.width, _ = first_frame.shape
-        
-        self.k_comps = np.int32(n_components)
+        self.d_means = cp.asarray(self.means)
+        self.d_vars = cp.asarray(self.vars)
+        self.d_weights = cp.asarray(self.weights)
+        self.d_modes = cp.asarray(self.modes)
+        self.d_mask = cp.asarray(self.mask)
 
-        # First component mean with the first frame
-        self.means = np.ones(shape=(self.k_comps, 3, self.height, self.width), dtype=np.float32)
-        self.means[0, :, :, :] = first_frame.transpose(2, 0, 1)
-        self.means = cp.asarray(self.means)
-    
-        # All variances to a fixed value
-        self.vars = cp.full(shape=(self.k_comps, self.height, self.width), fill_value=INIT_VAR, dtype=cp.float32)
-        
-        # Weight of the first component of each pixel is 1.0, the others are 0.0
-        self.weights = cp.zeros(shape=(self.k_comps, self.height, self.width), dtype=cp.float32)
-        self.weights[0, :, :] = 1.0
+        self.num_pixels = self.height * self.width
 
-        self.update_kernel = cp.RawKernel(UPDATE_KERNEL, "update_gmm", options=("-lineinfo",))
-        self.predict_kernel = cp.RawKernel(PREDICT_KERNEL, "predict_gmm", options=("-lineinfo",))
+        self.block = (TILE_X, TILE_Y)
+        self.grid = ((self.width + TILE_X - 1) // TILE_X,
+                     (self.height + TILE_Y - 1) // TILE_Y)
 
-        # GPU constants
-        self.num_pixels = np.int32(first_frame.shape[0] * first_frame.shape[1])
-        self.C = np.int32(first_frame.shape[2])
-        self.block_size = block_size
-        self.grid_size = (self.num_pixels + block_size - 1) // block_size
+        self.kernel = cp.RawKernel(STEP_KERNEL, "step_gmm", options=("-lineinfo",))        
 
-    def update(self, frame: cp.ndarray, diff_square_sum: cp.ndarray, match_threshold: np.float32, update_alpha: np.float32):
-        self.update_kernel((self.grid_size,), (self.block_size,), (
-            frame, diff_square_sum, self.means, self.vars, self.weights,
-            match_threshold, update_alpha,
-            INIT_VAR, REINIT_WEIGHT, self.num_pixels, self.C, self.k_comps
+    def step_device(self, d_frame, args, stream=0):
+        self.kernel(self.grid, self.block, (
+            d_frame,
+            self.d_weights,
+            self.d_means,
+            self.d_vars,
+            self.d_modes,
+            self.d_mask,
+            FLT_EPSILON,
+            self.num_pixels, self.n_channels, self.n_comps,
+            *args
         ))
+        return self.d_mask
 
-    def predict(self, frame: cp.ndarray, match_threshold: np.float32, weight_threshold: np.float32):
-        mask = cp.zeros(shape=(frame.shape[1], frame.shape[2]), dtype=cp.uint8)
-        diff_square_sum = cp.zeros_like(self.weights, dtype=cp.float32)
+    def _step_kernel(self, frame, args):
+        d_frame = cp.asarray(np.ascontiguousarray(frame))
 
-        self.predict_kernel((self.grid_size,), (self.block_size,), (
-            frame, diff_square_sum, mask,
-            self.means, self.vars, self.weights,
-            match_threshold, weight_threshold,
-            self.num_pixels, self.C, self.k_comps
-        ))
+        print(d_frame.shape)
+        print(d_frame.flags['C_CONTIGUOUS'])
+        print(d_frame.strides)
 
-        return mask, diff_square_sum
+        raise Exception("Test")
+        self.step_device(d_frame, args)
+        cp.cuda.Device().synchronize()
+        self.mask = self.d_mask.get()
 
-    def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32, comp_gen_threshold: np.float32 = None):
-        # Predict step 
-        (mask, diff_square_sum), predict_cost = gpu_timer(self.predict, frame=frame, match_threshold=match_threshold, weight_threshold=weight_threshold)
+    def sync_state(self):
+        self.weights = self.d_weights.get()
+        self.means = self.d_means.get()
+        self.vars = self.d_vars.get()
+        self.modes = self.d_modes.get()
 
-        # Update step
-        _, update_cost = gpu_timer(self.update, frame=frame, diff_square_sum=diff_square_sum, match_threshold=match_threshold, update_alpha=update_alpha)
-
-        # Refine mask
-        # TODO
-
-        return mask, predict_cost + update_cost
+    def background_image(self):
+        self.sync_state()
+        return super().background_image()
