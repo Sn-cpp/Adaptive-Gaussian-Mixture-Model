@@ -207,6 +207,65 @@ class CUDAPipeline:
         total = time.perf_counter() - t0
         return slot.h_out, slot.h_mask, {'total': total, 'fps': 1.0 / max(total, 1e-9)}
 
+    def profile(self, frame_bgr, update_alpha=-1.0, repeats=10):
+        """Per-stage GPU timing in milliseconds, measured with CUDA events.
+
+        Returns host->device transfer, GMM update, morphology, blur+composite
+        and device->host transfer separately, so the transfer cost that the
+        streamed path hides is visible. Timed on one stream with events between
+        stages, which serialises them — this is a breakdown, not a throughput
+        number; use `process` / `process_stream` for that.
+        """
+        cuda = self.cuda
+        slot = self.slots[0]
+        st = slot.stream
+        names = ['h2d', 'gmm', 'morph', 'blur_composite', 'd2h']
+        events = {n: (cuda.event(), cuda.event()) for n in names}
+        totals = dict.fromkeys(names, 0.0)
+
+        for _ in range(repeats):
+            args = self.model.next_args(update_alpha)
+            slot.h_frame[:] = frame_bgr
+            slot.h_planar[:] = to_planar(frame_bgr, self.color)
+
+            events['h2d'][0].record(stream=st)
+            slot.d_frame.copy_to_device(slot.h_frame, stream=st)
+            slot.d_planar.copy_to_device(slot.h_planar, stream=st)
+            events['h2d'][1].record(stream=st)
+
+            events['gmm'][0].record(stream=st)
+            mask = self.model.step_device(slot.d_planar, args, stream=st)
+            events['gmm'][1].record(stream=st)
+
+            events['morph'][0].record(stream=st)
+            if self.morphology:
+                self.bc.erode_kernel[self.grid, self.block, st](mask, self.d_mask_tmp)
+                self.bc.dilate_kernel[self.grid, self.block, st](
+                    self.d_mask_tmp, self.d_mask_clean)
+                mask = self.d_mask_clean
+            events['morph'][1].record(stream=st)
+
+            events['blur_composite'][0].record(stream=st)
+            self.bc.blur_h_kernel[self.grid, self.block, st](
+                slot.d_frame, slot.d_tmp, self.d_k1d)
+            self.bc.blur_v_composite_kernel[self.grid, self.block, st](
+                slot.d_tmp, slot.d_frame, mask, slot.d_out, self.d_k1d)
+            events['blur_composite'][1].record(stream=st)
+
+            events['d2h'][0].record(stream=st)
+            slot.d_out.copy_to_host(slot.h_out, stream=st)
+            mask.copy_to_host(slot.h_mask, stream=st)
+            events['d2h'][1].record(stream=st)
+
+            st.synchronize()
+            for n in names:
+                start, end = events[n]
+                totals[n] += start.elapsed_time(end)
+
+        out = {n: totals[n] / repeats for n in names}
+        out['total'] = sum(out[n] for n in names)
+        return out
+
     def process_stream(self, frames, update_alpha=-1.0):
         """Pipelined path: the upload of frame i overlaps the compute of frame i-1."""
         pending = []
