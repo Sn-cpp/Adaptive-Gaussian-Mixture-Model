@@ -27,7 +27,9 @@ class GMM_CUPY_V1(MOG2Base):
         self.d_modes = cp.asarray(self.modes)
         self.d_mask = cp.asarray(self.mask)
 
-        self.num_pixels = self.height * self.width
+        self.num_pixels = np.int32(self.height * self.width)
+        self.n_channels = np.int32(self.n_channels)
+        self.n_comps = np.int32(self.n_comps)
 
         self.block = (TILE_X, TILE_Y)
         self.grid = ((self.width + TILE_X - 1) // TILE_X,
@@ -51,12 +53,6 @@ class GMM_CUPY_V1(MOG2Base):
 
     def _step_kernel(self, frame, args):
         d_frame = cp.asarray(np.ascontiguousarray(frame))
-
-        print(d_frame.shape)
-        print(d_frame.flags['C_CONTIGUOUS'])
-        print(d_frame.strides)
-
-        raise Exception("Test")
         self.step_device(d_frame, args)
         cp.cuda.Device().synchronize()
         self.mask = self.d_mask.get()
