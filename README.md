@@ -194,6 +194,29 @@ at 720p (+23%) — and it is also markedly more stable: across 5 repeats at 1080
 the synchronous path ranged 30.2–38.1 FPS while the streamed path stayed within
 37.3–38.6.
 
+### Where the GPU frame actually goes
+
+Per-stage GPU time, CUDA events between stages, 20 repeats (ms/frame):
+
+| Resolution | H→D upload | GMM update | morphology | blur + composite | D→H readback | total |
+|---|---|---|---|---|---|---|
+| 480p  | 0.632 | 0.120 | 0.044 | 0.150 | 0.108 | 1.055 |
+| 720p  | 1.412 | 0.336 | 0.117 | 0.419 | 0.293 | 2.577 |
+| 1080p | 2.879 | 0.748 | 0.256 | 0.927 | 0.643 | 5.453 |
+
+The upload alone is **53–60%** of GPU time and the readback another 10–12%, so
+about two thirds of the frame is PCIe traffic and only a third is the three
+kernels. That is the measurement the streaming stretch goal rests on:
+`process_stream` overlaps exactly those rows with the previous frame's compute.
+
+It also shows the pipeline is **host-bound end to end**. At 1080p the stages
+above sum to ~5.5 ms (~180 FPS), while `process` measures ~42 FPS (~24 ms). The
+missing ~18 ms is host-side — the `cv2` colour conversion and the copies into the
+pinned staging buffers, on 2 Colab vCPUs. Moving the colour conversion into a
+kernel is the obvious next optimisation; it is kept on the host deliberately so
+every backend sees bit-identical model input and the CPU/GPU parity tests stay
+meaningful.
+
 Blur at 1080p — separable + shared-memory tiled vs the naive 2D convolution:
 **14.2× faster on the T4** (1.39 ms vs 20.4 ms, median of 5; observed 13.3–24.4×
 across sessions — the separable pass is stable at ~1.4 ms, the naive 2D kernel is
