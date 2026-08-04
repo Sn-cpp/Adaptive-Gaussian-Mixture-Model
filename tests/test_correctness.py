@@ -357,10 +357,18 @@ class TestGpuCupyV0:
 
 @requires_cupy
 class TestGpuCupyV1:
+    """GMM_CUPY_V1 is a MOG2 model, not a Stauffer-Grimson one.
 
-    def test_mask_vs_cpu(self, small_dims, default_params):
+    The CuPy v1 rewrite moved the class onto MOG2Base and fused predict/update
+    into one kernel, so it no longer exposes predict()/update() and comparing it
+    against GMM_CPU or GMM_CUPY_V0 compares two different algorithms. Its
+    reference is GMM_CPU_MOG2, the plain-Python MOG2 spec the Numba and
+    numba.cuda MOG2 backends are also checked against.
+    """
+
+    def test_mask_matches_the_mog2_reference(self, small_dims, default_params):
         import cupy as cp
-        from gmm import GMM_CUPY_V1
+        from gmm import GMM_CUPY_V1, GMM_CPU_MOG2
 
         H, W = small_dims
         K = default_params['n_components']
@@ -368,25 +376,30 @@ class TestGpuCupyV1:
         bt = default_params['bg_threshold']
         alpha = default_params['alpha']
 
-        frames = make_test_frames(H, W, n_frames=5)
-        cpu = GMM_CPU(frames[0].copy(), n_components=K)
+        frames = make_test_frames(H, W, n_frames=8)
+        ref = GMM_CPU_MOG2(frames[0].copy(), n_components=K)
         gpu = GMM_CUPY_V1(frames[0].copy(), n_components=K)
 
         for frame in frames[1:]:
             fp = to_planar(frame)
-            mask_cpu, dsq_cpu = cpu.predict(fp.copy(), mt, bt)
-            call_update(cpu, fp.copy(), mask_cpu, dsq_cpu, mt, alpha)
-            fp_gpu = cp.asarray(fp)
-            mask_gpu, dsq_gpu = gpu.predict(fp_gpu, mt, bt)
-            call_update(gpu, fp_gpu, mask_gpu, dsq_gpu, mt, alpha)
+            mask_ref, _ = ref.step(fp.copy(), mt, alpha, bt)
+            mask_gpu, _ = gpu.step(fp.copy(), mt, alpha, bt)
 
-        mask_gpu_np = cp.asnumpy(mask_gpu)
-        ok, diff = compare_masks(mask_cpu, mask_gpu_np, MASK_TOL_GPU)
-        assert ok, f"CuPy V1 vs CPU diff {diff:.4f} exceeds {MASK_TOL_GPU}"
+        mask_gpu = cp.asnumpy(cp.asarray(mask_gpu))
+        # Same algorithm, same arithmetic order: this one is exact, not tolerant.
+        assert np.array_equal(mask_ref, mask_gpu), \
+            f"CuPy V1 differs from the MOG2 reference in " \
+            f"{np.count_nonzero(mask_ref != mask_gpu)} pixels"
 
-    def test_v0_vs_v1(self, small_dims, default_params):
+    def test_agrees_with_the_numba_cuda_mog2_backend(self, small_dims, default_params):
+        """The two GPU MOG2 backends must not drift apart.
+
+        GMM_CUDA_MOG2 (numba.cuda) and GMM_CUPY_V1 (CuPy RawKernel) implement
+        the same algorithm through different toolchains; that pairing is the
+        point of having both, so a disagreement is a real defect in one of them.
+        """
         import cupy as cp
-        from gmm import GMM_CUPY_V0, GMM_CUPY_V1
+        from gmm import GMM_CUPY_V1, GMM_CUDA_MOG2
 
         H, W = small_dims
         K = default_params['n_components']
@@ -394,21 +407,19 @@ class TestGpuCupyV1:
         bt = default_params['bg_threshold']
         alpha = default_params['alpha']
 
-        frames = make_test_frames(H, W, n_frames=5)
-        v0 = GMM_CUPY_V0(frames[0].copy(), n_components=K)
-        v1 = GMM_CUPY_V1(frames[0].copy(), n_components=K)
+        frames = make_test_frames(H, W, n_frames=8)
+        cupy_v1 = GMM_CUPY_V1(frames[0].copy(), n_components=K)
+        numba_cuda = GMM_CUDA_MOG2(frames[0].copy(), n_components=K)
 
         for frame in frames[1:]:
-            fp_gpu = cp.asarray(to_planar(frame))
-            mask_v0, dsq_v0 = v0.predict(fp_gpu.copy(), mt, bt)
-            call_update(v0, fp_gpu.copy(), mask_v0, dsq_v0, mt, alpha)
-            mask_v1, dsq_v1 = v1.predict(fp_gpu.copy(), mt, bt)
-            call_update(v1, fp_gpu.copy(), mask_v1, dsq_v1, mt, alpha)
+            fp = to_planar(frame)
+            mask_cupy, _ = cupy_v1.step(fp.copy(), mt, alpha, bt)
+            mask_numba, _ = numba_cuda.step(fp.copy(), mt, alpha, bt)
 
-        mask_v0_np = cp.asnumpy(mask_v0)
-        mask_v1_np = cp.asnumpy(mask_v1)
-        ok, diff = compare_masks(mask_v0_np, mask_v1_np, MASK_TOL_GPU)
-        assert ok, f"CuPy V0 vs V1 diff {diff:.4f} exceeds {MASK_TOL_GPU}"
+        mask_cupy = cp.asnumpy(cp.asarray(mask_cupy))
+        mask_numba = np.asarray(mask_numba)
+        ok, diff = compare_masks(mask_numba, mask_cupy, MASK_TOL_GPU)
+        assert ok, f"CuPy V1 vs numba.cuda MOG2 diff {diff:.4f} exceeds {MASK_TOL_GPU}"
 
 
 # ---------------------------------------------------------------------------
