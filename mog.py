@@ -12,7 +12,6 @@ capture = cv2.VideoCapture(0)
 
 dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
 
-elip_mask = np.zeros((480, 640))
 while True:
     ret, frame = capture.read()
     if not ret:
@@ -23,6 +22,11 @@ while True:
 
     # 4. (Optional) Post-process to remove small noise points
     clean_mask = mask_refiner(fg_mask)
+
+    # Sized and typed from the frame we are actually holding, and rebuilt every
+    # iteration: keeping the previous frame's ellipse around leaves a patch of
+    # background sharp after the subject has left it.
+    elip_mask = np.zeros_like(clean_mask)
 
     # Find all white pixel coordinates
     pts = cv2.findNonZero(clean_mask)
@@ -47,9 +51,6 @@ while True:
 
         # 5. Compute the final clean average coordinate
         if len(inliers) > 240:
-            avg_x, avg_y = np.mean(inliers, axis=0)
-            avg_x, avg_y = int(avg_x), int(avg_y)
-
             # 1. Calculate absolute horizontal (X) and vertical (Y) distances from the center
             inlier_centers = np.mean(inliers, axis=0) # Or use the median_center
             abs_x_distances = np.abs(inliers[:, 0] - inlier_centers[0])
@@ -63,7 +64,6 @@ while True:
             center_coordinates = (int(inlier_centers[0]), int(inlier_centers[1]))
             axes_lengths = (max_x_dist, max_y_dist)
 
-            elip_mask = np.zeros_like(clean_mask, dtype=np.uint8)
             cv2.ellipse(
                 elip_mask, 
                 center_coordinates, 
