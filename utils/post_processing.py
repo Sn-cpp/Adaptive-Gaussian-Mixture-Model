@@ -28,8 +28,10 @@ def background_subtractor(frame: np.ndarray, mask: np.ndarray):
     # Blur the entire frame, serving as background
     blurred_frame = cv2.GaussianBlur(frame, (15, 15), 0)
 
-    foreground = cv2.bitwise_and(frame, frame, mask=mask)
-
-    result = cv2.copyTo(frame, foreground, blurred_frame)
+    # copyTo wants a binary mask, not an image. Passing a 3-channel BGR image
+    # makes OpenCV mask each channel separately, so any channel that happens to
+    # be 0 on the subject (dark hair, dark clothing, shadow) keeps the blurred
+    # value instead of the original one.
+    result = cv2.copyTo(frame, mask, blurred_frame)
 
     return result
