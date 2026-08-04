@@ -23,6 +23,19 @@ WEIGHT_THRESHOLD = np.float32(0.7)
 
 CPU_MODELS = [GMM_CPU, GMM_CPU_NUMBA, GMM_CPU_MOG2, GMM_CPU_NUMBA_MOG2]
 GPU_MODELS = [GMM_CUPY_V0, GMM_CUPY_V1, GMM_CUDA_MOG2]
+CUPY_MODELS = (GMM_CUPY_V0, GMM_CUPY_V1)
+
+
+def cupy_is_mocked():
+    """conftest swaps in a MagicMock for cupy so the module tree imports here.
+
+    A CuPy model driven against that mock does not raise — it returns mock
+    objects that `np.asarray` turns into an empty array — so the skip below has
+    to test for the mock directly rather than wait for an exception.
+    """
+    from unittest.mock import MagicMock
+    import cupy
+    return isinstance(cupy, MagicMock)
 
 
 def frames(n=4, seed=0):
@@ -77,6 +90,8 @@ def test_mask_is_not_degenerate(model_cls):
 def test_gpu_model_runs(model_cls):
     if model_cls is None:
         pytest.skip("GPU model unavailable — cupy / numba.cuda not installed")
+    if model_cls in CUPY_MODELS and cupy_is_mocked():
+        pytest.skip(f"{model_cls.__name__}: cupy is mocked, masks are meaningless")
     try:
         masks = drive(model_cls, frames())
     except Exception as e:                       # pragma: no cover - no real GPU
