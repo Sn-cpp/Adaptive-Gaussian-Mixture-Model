@@ -102,7 +102,13 @@ class GMM_CUPY_V0:
         return foreground_mask, diff_square_sum
 
     def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32, comp_gen_threshold: np.float32 = None):
-        # Predict step 
+        # step() is the host-facing entry point every model shares: main.py hands
+        # it a NumPy planar frame and feeds the mask straight into cv2. predict()
+        # and update() stay device-only, so do the two transfers here.
+        if not isinstance(frame, cp.ndarray):
+            frame = cp.asarray(np.ascontiguousarray(frame))
+
+        # Predict step
         (mask, diff_square_sum), predict_cost = gpu_timer(self.predict, frame=frame, match_threshold=match_threshold, weight_threshold=weight_threshold)
 
         # Update step
@@ -111,4 +117,4 @@ class GMM_CUPY_V0:
         # Refine mask
         # TODO
 
-        return mask, predict_cost + update_cost
+        return cp.asnumpy(mask), predict_cost + update_cost
