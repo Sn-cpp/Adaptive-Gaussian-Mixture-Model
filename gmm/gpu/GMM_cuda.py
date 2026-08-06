@@ -1,6 +1,6 @@
-"""CUDA MOG2 — same algorithm as `GMM_cpu_mog2`, one thread per pixel.
+"""CUDA MOG2 — same algorithm as `GMM_cpu`, one thread per pixel.
 
-Implemented with Numba CUDA rather than CuPy RawKernel (see `GMM_CUPY_V1` for
+Implemented with Numba CUDA rather than CuPy RawKernel (see `GMM_CUPY` for
 the CuPy route) so the exact same Python source can be validated on a CPU with
 NUMBA_ENABLE_CUDASIM=1.
 
@@ -178,7 +178,7 @@ def mog2_step_kernel(frame, weights, means, vars_, modes, mask,
         mask[y, x] = uint8(255)
 
 
-class GMM_CUDA_MOG2(MOG2Base):
+class GMM_CUDA(MOG2Base):
     """MOG2 with the model state resident on the GPU across frames.
 
     `step(frame)` takes and returns host arrays (convenient, one round trip per

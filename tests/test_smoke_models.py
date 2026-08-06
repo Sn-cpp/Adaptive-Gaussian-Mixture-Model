@@ -1,8 +1,8 @@
 """Every model in `main.py`'s registry must run through the shared step() call.
 
-This is the test that would have caught the three interface breaks we hit:
-`main.py` calling an undefined `step_func`, `GMM_CPU_NUMBA.step` requiring a
-fifth argument nobody passed, and `video_gmm.py` calling `step(frame)` with one.
+This is the test that would have caught the interface breaks we hit before it
+existed: `main.py` calling an undefined `step_func`, a step() signature drifting
+between backends, and `video_gmm.py` calling `step(frame)` with one argument.
 It exercises the exact call shape `main.py` uses, for every registered model.
 """
 import os
@@ -13,17 +13,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import numpy as np
 import pytest
 
-from gmm import (GMM_CPU, GMM_CPU_NUMBA, GMM_CPU_MOG2, GMM_CPU_NUMBA_MOG2,
-                 GMM_CUDA_MOG2, GMM_CUPY_V0, GMM_CUPY_V1)
+from gmm import GMM_CPU, GMM_CPU_NUMBA, GMM_CUDA, GMM_CUPY
 
 H, W, K = 32, 40, 5
 MATCH_THRESHOLD = np.float32(3.5)
 UPDATE_ALPHA = np.float32(0.01)
 WEIGHT_THRESHOLD = np.float32(0.7)
 
-CPU_MODELS = [GMM_CPU, GMM_CPU_NUMBA, GMM_CPU_MOG2, GMM_CPU_NUMBA_MOG2]
-GPU_MODELS = [GMM_CUPY_V0, GMM_CUPY_V1, GMM_CUDA_MOG2]
-CUPY_MODELS = (GMM_CUPY_V0, GMM_CUPY_V1)
+CPU_MODELS = [GMM_CPU, GMM_CPU_NUMBA]
+GPU_MODELS = [GMM_CUPY, GMM_CUDA]
+CUPY_MODELS = (GMM_CUPY,)
 
 
 def cupy_is_mocked():
@@ -77,8 +76,10 @@ def test_model_runs(model_cls):
 def test_mask_is_not_degenerate(model_cls):
     """A backend that calls every pixel foreground (or background) is broken.
 
-    GMM_CPU_NUMBA used to return an all-foreground mask because its background
-    loop broke on the cumulative weight before ever testing a match.
+    The since-removed Stauffer-Grimson Numba backend once returned an
+    all-foreground mask because its background loop broke on the cumulative
+    weight before ever testing a match; this guards every current backend
+    against that class of bug.
     """
     seq = frames(n=6)
     fg = (drive(model_cls, seq)[-1] == 255).mean()

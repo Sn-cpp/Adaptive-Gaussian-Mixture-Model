@@ -4,14 +4,14 @@ INIT_VAR = np.float32(15.0)
 REINIT_WEIGHT = np.float32(0.01)
 MAX_COMPONENTS = 20
 
-# Squared distance below which GMM_CPU_NUMBA reuses a component instead of
-# generating a new one. Was hard-coded as 9.0 at debug.py's call site.
+# Legacy Stauffer-Grimson knob, kept because debug.py still passes it and every
+# model's step() accepts-and-ignores it.
 COMP_GEN_THRESHOLD = np.float32(9.0)
 
 # ------------------------------------------------------------------------------
 # MOG2 model parameters (Zivkovic 2004).
 # These mirror the OpenCV `BackgroundSubtractorMOG2` defaults exactly, so the
-# GMM_*_MOG2 models can be compared 1:1 against cv2.
+# models can be compared 1:1 against cv2.
 
 MOG2_N_COMPONENTS = 5           # nmixtures
 MOG2_HISTORY = 500              # learning rate falls back to 1/history

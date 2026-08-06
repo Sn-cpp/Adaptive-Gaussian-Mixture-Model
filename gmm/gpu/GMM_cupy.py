@@ -17,7 +17,7 @@ TILE_X = 32
 TILE_Y = 8
 MAX_C = 3
 
-class GMM_CUPY_V1(MOG2Base):
+class GMM_CUPY(MOG2Base):
     def __init__(self, first_frame: np.ndarray, n_components: int, *arg, **kwargs):
         super().__init__(first_frame, n_components, *arg, **kwargs)
 

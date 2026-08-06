@@ -5,32 +5,29 @@ backend implementations for performance comparison.
 
 ## Backends
 
-Two families of models share one class contract and one planar state layout
+Every model is a from-scratch port of OpenCV `BackgroundSubtractorMOG2`
+(Zivkovic 2004). They share one class contract and one planar state layout
 (`means (K,C,H,W)`, `vars (K,H,W)`, `weights (K,H,W)`), and take planar
 `(C, H, W)` float32 frames.
 
-**Stauffer-Grimson (1999)** — fixed K, constant-alpha EMA:
-
 | Backend | Class | Description |
 |---|---|---|
-| NumPy (CPU) | `GMM_CPU` | Vectorized NumPy baseline |
-| Numba (CPU) | `GMM_CPU_NUMBA` | JIT-compiled with serial and `prange` parallel modes |
-| CuPy vectorized (GPU) | `GMM_CUPY_V0` | CuPy array operations on GPU |
-| CuPy RawKernel (GPU) | `GMM_CUPY_V1` | Custom CUDA kernels via CuPy RawKernel |
+| Python (CPU) | `GMM_CPU` | Plain Python reference — the specification the others follow |
+| Numba (CPU) | `GMM_CPU_NUMBA` | `@njit(parallel=True)`, `prange` over rows |
+| Numba CUDA (GPU) | `GMM_CUDA` | `@cuda.jit`, model state resident on the GPU |
+| CuPy RawKernel (GPU) | `GMM_CUPY` | Same algorithm through a hand-written `.cu` kernel |
 
-**MOG2 (Zivkovic 2004)** — a port of OpenCV `BackgroundSubtractorMOG2`:
-
-| Backend | Class | Description |
-|---|---|---|
-| Python (CPU) | `GMM_CPU_MOG2` | Plain Python reference — the specification the others follow |
-| Numba (CPU) | `GMM_CPU_NUMBA_MOG2` | `@njit(parallel=True)`, `prange` over rows |
-| Numba CUDA (GPU) | `GMM_CUDA_MOG2` | `@cuda.jit`, model state resident on the GPU |
-
-The MOG2 family adds a per-pixel adaptive mode count, the `k = alpha/w_new`
-update, variance clamping, complexity-reduction pruning, separate `Tb`/`Tg`/`TB`
+MOG2 keeps a per-pixel adaptive mode count, the `k = alpha/w_new` update,
+variance clamping, complexity-reduction pruning, separate `Tb`/`Tg`/`TB`
 thresholds and shadow detection — which is what makes it reproduce OpenCV.
-Because MOG2 fuses classification and update into one traversal, those models
-expose `step()` instead of the `predict()` / `update()` pair.
+Classification and update are fused into one traversal, so every model exposes a
+single `step()`. `GMM_CUDA` and `GMM_CUPY` implement the same kernel through two
+independent toolchains and are pinned to each other by the test suite.
+
+An earlier Stauffer-Grimson (1999) family (`GMM_CPU`/`GMM_CPU_NUMBA`/
+`GMM_CUPY_V0`/`GMM_CUPY_V1` before commit `a6b1d0f`) was retired: its NumPy
+baseline was vectorized (not a sequential reference), and its backends had
+drifted apart algorithmically. The git history keeps it.
 
 ## Installation
 
@@ -38,15 +35,15 @@ expose `step()` instead of the `predict()` / `update()` pair.
 pip install -r requirements.txt
 ```
 
-For the CuPy backends, install CuPy matching your CUDA version:
+For the CuPy backend, install CuPy matching your CUDA version:
 ```bash
 pip install cupy-cuda12x   # CUDA 12.x
 # or
 pip install cupy-cuda11x   # CUDA 11.x
 ```
 
-CuPy is optional — only `GMM_CUPY_V0` / `GMM_CUPY_V1` need it. Everything else,
-including `GMM_CUDA_MOG2`, imports without it.
+CuPy is optional — only `GMM_CUPY` needs it. Everything else, including
+`GMM_CUDA`, imports without it.
 
 Conda alternative:
 ```bash
@@ -61,20 +58,21 @@ python tests/test_env.py
 python main.py
 ```
 
-Select the backend via `--model` (0=CPU, 1=Numba, 2=CuPy V0, 3=CuPy V1, 4=MOG2 CPU, 5=MOG2 Numba,
-6=MOG2 CUDA); see `python main.py --help`.
+Select the backend via `--model` (0=CPU, 1=Numba, 2=CUDA, 3=CuPy RawKernel);
+see `python main.py --help`. `--colorspace ycrcb` runs the model in YCrCb while
+the display stays BGR — on CDnet `highway` this lifts mask F1 from 0.73 to 0.86
+(shadow detection on) by separating luma from chroma.
 
-Stauffer-Grimson defaults: `K=7`, `match_threshold=3.5`, `bg_threshold=0.7`,
-`alpha=0.01`. MOG2 defaults match OpenCV and live in `settings.py`.
+Model defaults match OpenCV and live in `settings.py`.
 
 The full blur pipeline —
 `frame → MOG2 step (mask) → morphological open → separable blur ⨝ composite`:
 
 ```python
-from gmm import GMM_CPU_NUMBA_MOG2          # or GMM_CUDA_MOG2
+from gmm import GMM_CPU_NUMBA          # or GMM_CUDA
 from pipeline import make_pipeline
 
-p = make_pipeline(GMM_CPU_NUMBA_MOG2, first_frame, n_components=5)
+p = make_pipeline(GMM_CPU_NUMBA, first_frame, n_components=5)
 out, mask, timings = p.process(frame_bgr)
 ```
 
@@ -82,7 +80,7 @@ The model on its own:
 
 ```python
 from gmm.mog2_common import to_planar
-model = GMM_CPU_NUMBA_MOG2(first_frame, n_components=5)
+model = GMM_CPU_NUMBA(first_frame, n_components=5)
 mask, seconds = model.step(to_planar(frame_bgr))   # planar (C, H, W) float32
 ```
 
@@ -137,14 +135,11 @@ kernel — well inside the 1e-5 tolerance the suite asserts.
 ├── gmm/
 │   ├── mog2_common.py                # MOG2 state, params, background image, cv2 reference
 │   ├── cpu/
-│   │   ├── GMM_cpu.py                # NumPy vectorized
-│   │   ├── GMM_cpu_numba.py          # Numba JIT (serial + parallel)
-│   │   ├── GMM_cpu_mog2.py           # MOG2 reference implementation
-│   │   └── GMM_cpu_numba_mog2.py     # MOG2, prange over rows
+│   │   ├── GMM_cpu.py                # Plain-Python reference implementation
+│   │   └── GMM_cpu_numba.py          # Numba JIT, prange over rows
 │   └── gpu/
-│       ├── GMM_cupy_v0.py            # CuPy array ops
-│       ├── GMM_cupy_v1.py            # CuPy RawKernel
-│       ├── GMM_cuda_mog2.py          # MOG2 on Numba CUDA
+│       ├── GMM_cuda.py               # Numba CUDA, state resident on GPU
+│       ├── GMM_cupy.py               # CuPy RawKernel
 │       └── kernels/                  # CUDA .cu kernel files
 ├── utils/
 │   ├── post_processing.py            # Morphological refinement, background blur (OpenCV)
@@ -153,9 +148,10 @@ kernel — well inside the 1e-5 tolerance the suite asserts.
 │   ├── benchmark.py                  # Timing and mask-quality helpers
 │   └── timer.py                      # CPU/GPU timing utilities
 ├── tests/
-│   ├── conftest.py                   # pytest fixtures
-│   ├── test_correctness.py           # Cross-backend tests (Stauffer-Grimson)
+│   ├── conftest.py                   # pytest fixtures + cupy mock
 │   ├── test_mog2_correctness.py      # OpenCV parity, model agreement, stability
+│   ├── test_smoke_models.py          # Every model through main.py's call shape
+│   ├── test_post_processing.py       # Mask refinement + blur composite
 │   └── test_env.py                   # Environment smoke test
 ├── notebooks/                        # Deliverable notebook
 ├── pipeline.py                       # Pipeline / CUDAPipeline (pinned buffers, 2 streams)
@@ -182,7 +178,7 @@ the CUDA path ranged **30.2 to 45.0 FPS**. Every figure below is therefore the
 **median of repeated runs**, never a single one — treat any single benchmark
 from this notebook as ±20%.
 
-| Resolution | `GMM_CPU_MOG2` | `GMM_CPU_NUMBA_MOG2` | `GMM_CUDA_MOG2` | `GMM_CUDA_MOG2` streamed |
+| Resolution | `GMM_CPU` | `GMM_CPU_NUMBA` | `GMM_CUDA` | `GMM_CUDA` streamed |
 |---|---|---|---|---|
 | 480p  | 0.31 FPS | 13.2 FPS | 358 FPS | **376 FPS** |
 | 720p  | 0.10 FPS |  4.4 FPS | 103 FPS | **126 FPS** |

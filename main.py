@@ -13,15 +13,12 @@ if __name__ == "__main__":
     model_list = {
         0: ("CPU", GMM_CPU),
         1: ("Numba", GMM_CPU_NUMBA),
-        2: ("CuPy vectorized", GMM_CUPY_V0),
-        3: ("CuPy RawKernel", GMM_CUPY_V1),
-        4: ("MOG2 CPU", GMM_CPU_MOG2),
-        5: ("MOG2 Numba", GMM_CPU_NUMBA_MOG2),
-        6: ("MOG2 CUDA", GMM_CUDA_MOG2),
+        2: ("CUDA", GMM_CUDA),
+        3: ("CuPy RawKernel", GMM_CUPY),
     }
 
-    # Models 4-6 reproduce OpenCV's BackgroundSubtractorMOG2. They keep their own
-    # calibrated thresholds (settings.MOG2_*) and ignore --match_threshold /
+    # Every model reproduces OpenCV's BackgroundSubtractorMOG2. They keep their
+    # own calibrated thresholds (settings.MOG2_*) and ignore --match_threshold /
     # --weight_threshold; --update_alpha still applies, and a negative value
     # selects OpenCV's warm-up ramp 1/min(2*nframes, history).
 
@@ -37,6 +34,9 @@ if __name__ == "__main__":
     parser.add_argument("--update_alpha", type=float, default=0.01, help="Updating rate for components")
     parser.add_argument("--match_threshold", type=float, default=3.5, help="Background matching threshold")
     parser.add_argument("--weight_threshold", type=float, default=0.7, help="Cumulative weight threshold for components")
+    parser.add_argument("--colorspace", type=str, default="bgr", choices=("bgr", "ycrcb"),
+                        help="Colorspace the model sees. ycrcb separates luma from chroma "
+                             "(+6 to +13 F1 on CDnet highway); display stays BGR either way")
 
     args = parser.parse_args()
 
@@ -81,14 +81,21 @@ if __name__ == "__main__":
     match_threshold = np.float32(args.match_threshold)
     weight_threshold = np.float32(args.weight_threshold)
 
-    model = model_list[model_choice][1](first_frame, n_components=gaussian_components, parallel=True)
+    # The model can watch a different colorspace than the one we display: the
+    # mask is colorspace-agnostic, and the blur composite always uses the BGR
+    # frame. YCrCb separates luma from chroma, which measurably cleans up the
+    # mask under shadows.
+    use_ycrcb = args.colorspace == "ycrcb"
+    to_model = (lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb)) if use_ycrcb else (lambda f: f)
+
+    model = model_list[model_choice][1](to_model(first_frame), n_components=gaussian_components, parallel=True)
 
 
     # --------------------------------------------------------------------------------------
     # Running
 
-    # Warmup the GPU (only the CuPy models need it)
-    if model_choice in (2, 3):
+    # Warmup the GPU (only the CuPy model needs it)
+    if model_choice == 3 and cp_gpu_warmup is not None:
         cp_gpu_warmup()
 
     print("Ready")
@@ -99,14 +106,13 @@ if __name__ == "__main__":
             running = False
             continue
 
-        # Convert the frame to planar mode (C, H, W) with C=3 (BGR)
-        planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
+        # Convert the frame to planar mode (C, H, W)
+        planar_frame = to_model(frame).transpose(2, 0, 1).astype(np.float32)
 
         mask, time_cost = model.step(planar_frame, match_threshold, update_alpha, weight_threshold)
         model_fps = int(1 / max(time_cost, 1e-9))
 
         # MOG2 marks shadows as 127; anything that is not 255 is background.
-        # No-op for the Stauffer-Grimson models, whose masks are already 0/255.
         mask = np.where(mask == 255, np.uint8(255), np.uint8(0))
 
         refined_mask = mask_refiner(mask)

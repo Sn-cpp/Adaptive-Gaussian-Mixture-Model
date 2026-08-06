@@ -44,13 +44,13 @@ def gpu_name():
 
 def available_models():
     """The MOG2 models that can actually run on this machine."""
-    from gmm.cpu.GMM_cpu_mog2 import GMM_CPU_MOG2
-    from gmm.cpu.GMM_cpu_numba_mog2 import GMM_CPU_NUMBA_MOG2
-    models = {'sequential': GMM_CPU_MOG2, 'numba_cpu': GMM_CPU_NUMBA_MOG2}
+    from gmm.cpu.GMM_cpu import GMM_CPU
+    from gmm.cpu.GMM_cpu_numba import GMM_CPU_NUMBA
+    models = {'sequential': GMM_CPU, 'numba_cpu': GMM_CPU_NUMBA}
     try:
-        from gmm.gpu.GMM_cuda_mog2 import GMM_CUDA_MOG2, is_available
+        from gmm.gpu.GMM_cuda import GMM_CUDA, is_available
         if is_available() or os.environ.get('NUMBA_ENABLE_CUDASIM') == '1':
-            models['cuda'] = GMM_CUDA_MOG2
+            models['cuda'] = GMM_CUDA
     except Exception:
         pass
     return models
@@ -134,7 +134,7 @@ class _Slot:
 class CUDAPipeline:
     """Same `process(frame_bgr)` contract as `Pipeline`, plus a streamed variant."""
 
-    NAME = 'GMM_CUDA_MOG2'
+    NAME = 'GMM_CUDA'
 
     def __init__(self, model_cls, first_frame, n_components=5, color=True,
                  morphology=True, ksize=BLUR_KSIZE, sigma=BLUR_SIGMA,
@@ -285,6 +285,6 @@ class CUDAPipeline:
 
 def make_pipeline(model_cls, first_frame, **kw):
     """Pick the CUDA pipeline automatically for the CUDA model."""
-    if model_cls.__name__ == 'GMM_CUDA_MOG2':
+    if model_cls.__name__ == 'GMM_CUDA':
         return CUDAPipeline(model_cls, first_frame, **kw)
     return Pipeline(model_cls, first_frame, **kw)

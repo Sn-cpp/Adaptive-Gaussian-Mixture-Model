@@ -1,6 +1,6 @@
 """Correctness suite for the MOG2 models.
 
-Run directly (`python tests/test_correctness.py`) or under pytest.
+Run directly (`python tests/test_mog2_correctness.py`) or under pytest.
 Set NUMBA_ENABLE_CUDASIM=1 to exercise the CUDA kernels without a GPU.
 """
 import math
@@ -15,8 +15,8 @@ import numpy as np
 from settings import (MOG2_BACKGROUND_RATIO, MOG2_HISTORY, MOG2_N_COMPONENTS,
                       MOG2_VAR_MAX, MOG2_VAR_MIN)
 from gmm.mog2_common import opencv_reference, to_planar
-from gmm.cpu.GMM_cpu_mog2 import GMM_CPU_MOG2
-from gmm.cpu.GMM_cpu_numba_mog2 import GMM_CPU_NUMBA_MOG2
+from gmm.cpu.GMM_cpu import GMM_CPU
+from gmm.cpu.GMM_cpu_numba import GMM_CPU_NUMBA
 
 
 # ------------------------------------------------------------------ fixtures
@@ -88,11 +88,11 @@ def _opencv_parity(color, model_cls):
 
 def test_opencv_parity_gray():
     print("OpenCV MOG2 parity:")
-    _opencv_parity(color=False, model_cls=GMM_CPU_NUMBA_MOG2)
+    _opencv_parity(color=False, model_cls=GMM_CPU_NUMBA)
 
 
 def test_opencv_parity_color():
-    _opencv_parity(color=True, model_cls=GMM_CPU_NUMBA_MOG2)
+    _opencv_parity(color=True, model_cls=GMM_CPU_NUMBA)
 
 
 def test_opencv_parity_real_video():
@@ -123,7 +123,7 @@ def test_opencv_parity_real_video():
 
     mog2 = opencv_reference()
     cv_masks = [mog2.apply(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)) for f in frames]
-    our_masks, _ = run_model(GMM_CPU_NUMBA_MOG2, frames, color=False)
+    our_masks, _ = run_model(GMM_CPU_NUMBA, frames, color=False)
 
     total = sum(m.size for m in cv_masks)
     ndiff = sum(int((a != b).sum()) for a, b in zip(cv_masks, our_masks))
@@ -152,13 +152,13 @@ def _compare_models(a_cls, b_cls, label, n=12, H=32, W=40, color=False):
 
 
 def test_sequential_matches_numba():
-    _compare_models(GMM_CPU_MOG2, GMM_CPU_NUMBA_MOG2, 'sequential vs numba')
+    _compare_models(GMM_CPU, GMM_CPU_NUMBA, 'sequential vs numba')
 
 
 def test_cuda_matches_cpu():
     simulator = os.environ.get('NUMBA_ENABLE_CUDASIM') == '1'
     try:
-        from gmm.gpu.GMM_cuda_mog2 import GMM_CUDA_MOG2, is_available
+        from gmm.gpu.GMM_cuda import GMM_CUDA, is_available
         if not simulator and not is_available():
             print("  CUDA unavailable — skipped")
             return
@@ -166,7 +166,53 @@ def test_cuda_matches_cpu():
         print(f"  CUDA import failed ({e}) — skipped")
         return
     n, H, W = (3, 8, 8) if simulator else (12, 48, 64)
-    _compare_models(GMM_CPU_NUMBA_MOG2, GMM_CUDA_MOG2, 'cpu vs cuda', n, H, W)
+    _compare_models(GMM_CPU_NUMBA, GMM_CUDA, 'cpu vs cuda', n, H, W)
+
+
+def _cupy_usable():
+    """conftest may substitute a MagicMock for cupy; a mock swallows every call
+    without raising, so an exception-based probe is not enough."""
+    from unittest.mock import MagicMock
+    try:
+        import cupy as cp
+        if isinstance(cp, MagicMock):
+            return False
+        cp.zeros(1)
+        return True
+    except Exception:                                        # pragma: no cover
+        return False
+
+
+def test_cupy_matches_cpu():
+    """The CuPy RawKernel backend against the plain-Python reference.
+
+    Measured on a Colab T4: bit-exact, so this asserts equality. Follows the
+    same print-and-return skip style as test_cuda_matches_cpu so the file still
+    runs directly on CuPy-less machines.
+    """
+    if not _cupy_usable():
+        print("  CuPy unavailable — skipped")
+        return
+    from gmm.gpu.GMM_cupy import GMM_CUPY
+    _compare_models(GMM_CPU, GMM_CUPY, 'cpu vs cupy')
+
+
+def test_cupy_matches_numba_cuda():
+    """The two GPU backends implement one algorithm through two toolchains
+    (CuPy RawKernel vs numba.cuda); a disagreement is a defect in one of them."""
+    if not _cupy_usable():
+        print("  CuPy unavailable — skipped")
+        return
+    try:
+        from gmm.gpu.GMM_cuda import GMM_CUDA, is_available
+        if not is_available():
+            print("  CUDA unavailable — skipped")
+            return
+    except Exception as e:                                   # pragma: no cover
+        print(f"  CUDA import failed ({e}) — skipped")
+        return
+    from gmm.gpu.GMM_cupy import GMM_CUPY
+    _compare_models(GMM_CUDA, GMM_CUPY, 'numba.cuda vs cupy')
 
 
 def test_full_pipeline_backends_agree():
@@ -174,7 +220,7 @@ def test_full_pipeline_backends_agree():
     from pipeline import make_pipeline
     frames = synthetic_sequence(n=6, H=32, W=40)
     outs = {}
-    for name, cls in (('sequential', GMM_CPU_MOG2), ('numba', GMM_CPU_NUMBA_MOG2)):
+    for name, cls in (('sequential', GMM_CPU), ('numba', GMM_CPU_NUMBA)):
         p = make_pipeline(cls, frames[0], n_components=MOG2_N_COMPONENTS)
         for f in frames:
             out, mask, _ = p.process(f)
@@ -218,7 +264,7 @@ def test_stationary_object_persists():
         n_cv = _absorption_frames(
             lambda f: mog2.apply(f, learningRate=alpha), bg, obj, box)
 
-        model = GMM_CPU_NUMBA_MOG2(bg, n_components=MOG2_N_COMPONENTS,
+        model = GMM_CPU_NUMBA(bg, n_components=MOG2_N_COMPONENTS,
                                    detect_shadows=False)
         n_ours = _absorption_frames(
             lambda f: model.step(to_planar(f), None, alpha)[0], bg, obj, box)
@@ -242,7 +288,7 @@ def test_long_run_stability():
     H, W = 24, 32
     rng = np.random.default_rng(7)
     base = np.zeros((H, W, 3), np.uint8)
-    model = GMM_CPU_NUMBA_MOG2(base, n_components=MOG2_N_COMPONENTS)
+    model = GMM_CPU_NUMBA(base, n_components=MOG2_N_COMPONENTS)
     for i in range(n):
         f = np.clip(rng.normal(120, 20, (H, W, 3)), 0, 255).astype(np.uint8)
         if i % 7 == 0:
@@ -272,6 +318,7 @@ def test_long_run_stability():
 TESTS = [test_opencv_parity_gray, test_opencv_parity_color,
          test_opencv_parity_real_video,
          test_sequential_matches_numba, test_cuda_matches_cpu,
+         test_cupy_matches_cpu, test_cupy_matches_numba_cuda,
          test_full_pipeline_backends_agree,
          test_stationary_object_persists, test_long_run_stability]
 

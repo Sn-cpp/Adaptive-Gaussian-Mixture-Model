@@ -1,7 +1,7 @@
 """Shared helpers for the MOG2 models.
 
-The per-pixel algorithm implemented by `GMM_CPU_MOG2`, `GMM_CPU_NUMBA_MOG2` and
-`GMM_CUDA_MOG2` is a direct port of OpenCV's `BackgroundSubtractorMOG2`
+The per-pixel algorithm implemented by `GMM_CPU`, `GMM_CPU_NUMBA` and
+`GMM_CUDA` is a direct port of OpenCV's `BackgroundSubtractorMOG2`
 (Zivkovic 2004, `bgfg_gaussmix2.cpp`). State is kept in the same planar layout
 the rest of the project uses:
 

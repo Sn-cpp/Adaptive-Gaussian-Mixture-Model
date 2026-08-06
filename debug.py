@@ -14,8 +14,8 @@ if __name__ == "__main__":
     model_list = {
         0: ("CPU", GMM_CPU),
         1: ("Numba", GMM_CPU_NUMBA),
-        2: ("CuPy vectorized", GMM_CUPY_V0),
-        3: ("CuPy RawKernel", GMM_CUPY_V1)
+        2: ("CUDA", GMM_CUDA),
+        3: ("CuPy RawKernel", GMM_CUPY)
     }
 
 
@@ -86,8 +86,8 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------------------------
     # Running
 
-    # Warmup the GPU (if used)
-    if model_choice >= 2:
+    # Warmup the GPU (only the CuPy model needs it)
+    if model_choice == 3 and cp_gpu_warmup is not None:
         cp_gpu_warmup()
 
     print(cv2_gmm.getHistory())

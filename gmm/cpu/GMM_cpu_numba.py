@@ -1,203 +1,185 @@
+"""Numba MOG2 — same algorithm as `GMM_cpu`, `prange` over rows.
+
+Each row owns its pixels' state, so there is no synchronisation at all.
+"""
 import numpy as np
 from numba import njit, prange
-from utils import cpu_timer
 
-from settings import INIT_VAR, REINIT_WEIGHT, COMP_GEN_THRESHOLD
+from settings import FLT_EPSILON
+from gmm.mog2_common import MOG2Base
+
+_JIT = dict(cache=True, fastmath=False)
 
 
-@njit(cache=True, parallel=True)
-def update_numba_parallel(frame: np.ndarray, mask: np.ndarray, diff_square_sum: np.ndarray,
-                match_threshold: float, update_alpha: float, comp_gen_threshold: float, 
-                k_comps: int, means: np.ndarray, vars: np.ndarray, weights: np.ndarray):
+@njit(cache=True)
+def _detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
+    t_weight = np.float32(0.0)
+    for mode in range(nmodes):
+        num = np.float32(0.0)
+        den = np.float32(0.0)
+        for c in range(C):
+            num += frame[c, y, x] * means[mode, c, y, x]
+            den += means[mode, c, y, x] * means[mode, c, y, x]
+        if den == 0.0:
+            return False
+        if num <= den and num >= tau * den:
+            a = num / den
+            dist2a = np.float32(0.0)
+            for c in range(C):
+                dD = a * means[mode, c, y, x] - frame[c, y, x]
+                dist2a += dD * dD
+            if dist2a < Tb * vars_[mode, y, x] * a * a:
+                return True
+        t_weight += weights[mode, y, x]
+        if t_weight > TB:
+            return False
+    return False
 
-    sqr_threshold = match_threshold ** 2
-    
-    for i in prange(frame.shape[1]):
-        for j in range(frame.shape[2]):
-            p0 = frame[0, i, j]
-            p1 = frame[1, i, j]
-            p2 = frame[2, i, j]
-            
-            min_err_comp = -1
-            min_err_val = np.inf
-            min_dist = np.inf
 
-            # Find the best matching component
-            for k in range(k_comps):
-                diff_sqr = diff_square_sum[k, i, j] / (vars[k, i, j] + 1e-12)
-                
-                if diff_sqr < sqr_threshold:
-                    if diff_sqr < min_err_val:
-                        min_err_val = diff_sqr
-                        min_err_comp = k
+@njit(parallel=True, **_JIT)
+def mog2_step(frame, weights, means, vars_, modes, mask,
+              alpha, prune, Tb, Tg, TB, var_init, var_min, var_max,
+              tau, shadow_val, detect_shadows):
+    K = weights.shape[0]
+    C = means.shape[1]
+    H = frame.shape[1]
+    W = frame.shape[2]
+    alpha1 = np.float32(1.0) - alpha
 
-                if diff_sqr < min_dist:
-                    min_dist = diff_sqr
+    for y in prange(H):
+        dData = np.empty(C, dtype=np.float32)
+        for x in range(W):
+            background = False
+            fits_pdf = False
+            nmodes = np.int32(modes[y, x])
+            total_weight = np.float32(0.0)
 
-            # Determine alpha based on current classification (not previous mask)
-            # Use the mask from the prediction step
-            is_foreground = (mask[i, j] > 0)
-            if is_foreground:
-                alpha = 0.01  # Extremely slow for foreground persistence
+            mode = 0
+            while mode < nmodes:
+                weight = alpha1 * weights[mode, y, x] + prune
+                swap_count = 0
+
+                if not fits_pdf:
+                    var = vars_[mode, y, x]
+                    dist2 = np.float32(0.0)
+                    for c in range(C):
+                        dd = means[mode, c, y, x] - frame[c, y, x]
+                        dData[c] = dd
+                        dist2 += dd * dd
+
+                    if total_weight < TB and dist2 < Tb * var:
+                        background = True
+
+                    if dist2 < Tg * var:
+                        fits_pdf = True
+                        weight += alpha
+                        k = alpha / weight
+
+                        for c in range(C):
+                            means[mode, c, y, x] -= k * dData[c]
+
+                        varnew = var + k * (dist2 - var)
+                        if varnew < var_min:
+                            varnew = var_min
+                        if varnew > var_max:
+                            varnew = var_max
+                        vars_[mode, y, x] = varnew
+
+                        i = mode
+                        while i > 0:
+                            if weight < weights[i - 1, y, x]:
+                                break
+                            swap_count += 1
+                            tw = weights[i, y, x]
+                            weights[i, y, x] = weights[i - 1, y, x]
+                            weights[i - 1, y, x] = tw
+                            tv = vars_[i, y, x]
+                            vars_[i, y, x] = vars_[i - 1, y, x]
+                            vars_[i - 1, y, x] = tv
+                            for c in range(C):
+                                tm = means[i, c, y, x]
+                                means[i, c, y, x] = means[i - 1, c, y, x]
+                                means[i - 1, c, y, x] = tm
+                            i -= 1
+
+                if weight < -prune:
+                    weight = np.float32(0.0)
+                    nmodes -= 1
+
+                weights[mode - swap_count, y, x] = weight
+                total_weight += weight
+                mode += 1
+
+            inv_weight = np.float32(0.0)
+            if abs(total_weight) > FLT_EPSILON:
+                inv_weight = np.float32(1.0) / total_weight
+            for mode in range(nmodes):
+                weights[mode, y, x] *= inv_weight
+
+            if not fits_pdf and alpha > 0.0:
+                if nmodes == K:
+                    mode = K - 1
+                else:
+                    mode = nmodes
+                    nmodes += 1
+
+                if nmodes == 1:
+                    weights[mode, y, x] = np.float32(1.0)
+                else:
+                    weights[mode, y, x] = alpha
+                    for i in range(nmodes - 1):
+                        weights[i, y, x] *= alpha1
+
+                for c in range(C):
+                    means[mode, c, y, x] = frame[c, y, x]
+                vars_[mode, y, x] = var_init
+
+                i = nmodes - 1
+                while i > 0:
+                    if alpha < weights[i - 1, y, x]:
+                        break
+                    tw = weights[i, y, x]
+                    weights[i, y, x] = weights[i - 1, y, x]
+                    weights[i - 1, y, x] = tw
+                    tv = vars_[i, y, x]
+                    vars_[i, y, x] = vars_[i - 1, y, x]
+                    vars_[i - 1, y, x] = tv
+                    for c in range(C):
+                        tm = means[i, c, y, x]
+                        means[i, c, y, x] = means[i - 1, c, y, x]
+                        means[i - 1, c, y, x] = tm
+                    i -= 1
+
+            modes[y, x] = nmodes
+
+            if background:
+                mask[y, x] = 0
+            elif detect_shadows and _detect_shadow(
+                    frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
+                mask[y, x] = shadow_val
             else:
-                alpha = update_alpha
-            
-            one_minus_alpha = 1.0 - alpha
+                mask[y, x] = 255
 
-            for k in range(k_comps):
-                weights[k, i, j] *= one_minus_alpha
-
-            if min_err_comp != -1:
-                # Use rho = alpha (simplified) or clamp the exponential
-                rho = max(alpha * 0.3, alpha * np.exp(-0.5 * min_err_val))
-                
-                # Weight update for matched component
-                weights[min_err_comp, i, j] += alpha
-
-                # Update mean
-                means[min_err_comp, 0, i, j] += rho * (p0 - means[min_err_comp, 0, i, j])
-                means[min_err_comp, 1, i, j] += rho * (p1 - means[min_err_comp, 1, i, j])
-                means[min_err_comp, 2, i, j] += rho * (p2 - means[min_err_comp, 2, i, j])
-
-                # Correct variance update
-                vars[min_err_comp, i, j] = (1 - rho) * vars[min_err_comp, i, j] + rho * min_err_val
-
-            else:
-                # No match found
-                if min_dist > comp_gen_threshold:
-                    weakest_comp = 0
-                    min_weight = weights[0, i, j]
-                    for k in range(1, k_comps):
-                        if weights[k, i, j] < min_weight:
-                            min_weight = weights[k, i, j]
-                            weakest_comp = k
-                
-                    means[weakest_comp, 0, i, j] = p0
-                    means[weakest_comp, 1, i, j] = p1
-                    means[weakest_comp, 2, i, j] = p2
-                    vars[weakest_comp, i, j] = INIT_VAR
-                    weights[weakest_comp, i, j] = REINIT_WEIGHT
-
-            # Normalize weights
-            sum_w = 0.0
-            for k in range(k_comps):
-                sum_w += weights[k, i, j]
-                
-            if sum_w > 0:
-                for k in range(k_comps):
-                    weights[k, i, j] /= sum_w
-
-@njit(cache=True, parallel=True)
-def predict_numba_parallel(frame: np.ndarray, match_threshold: float, weight_threshold: float,
-                  k_comps: int, means: np.ndarray, vars: np.ndarray, weights: np.ndarray):
-    
-    diff_square_sum = np.zeros(shape=(k_comps, frame.shape[1], frame.shape[2]), dtype=np.float32)
-    foreground_mask = np.zeros(shape=(frame.shape[1], frame.shape[2]), dtype=np.uint8)
-    sqr_match = match_threshold ** 2
-    
-    for i in prange(frame.shape[1]):
-        for j in range(frame.shape[2]):
-            p0 = frame[0, i, j]
-            p1 = frame[1, i, j]
-            p2 = frame[2, i, j]
-
-            ranks = np.zeros(k_comps, dtype=np.float32)
-            order = np.arange(k_comps)
-            matches = np.zeros(k_comps, dtype=np.bool_)
-            
-            # Pre-compute diff_square_sum for update step
-            for k in range(k_comps):
-                diff_0 = p0 - means[k, 0, i, j]
-                diff_1 = p1 - means[k, 1, i, j]
-                diff_2 = p2 - means[k, 2, i, j]
-                
-                err = diff_0**2 + diff_1**2 + diff_2**2
-                diff_square_sum[k, i, j] = err
-                
-                # Store match status
-                matches[k] = err < (sqr_match * vars[k, i, j])
-                ranks[k] = weights[k, i, j] / (np.sqrt(vars[k, i, j]) + 1e-6)
-
-            # Sort ranks (bubble sort - consider using argsort for faster)
-            for m in range(k_comps - 1):
-                for n in range(0, k_comps - m - 1):
-                    if ranks[n] < ranks[n + 1]:
-                        ranks[n], ranks[n + 1] = ranks[n + 1], ranks[n]
-                        order[n], order[n + 1] = order[n + 1], order[n]
-
-            # Correct background classification
-            is_background = False
-            cumulative_weight = 0.0
-
-            for k in range(k_comps):
-                idx = order[k]
-                cumulative_weight += weights[idx, i, j]
-
-                # The highest-ranked component is always part of the background,
-                # mirroring `background_components[0] = True` in GMM_CPU. Without
-                # this guard the first component (weight 1.0 right after init)
-                # already exceeds the threshold, the loop breaks before testing
-                # `matches`, and every pixel comes out as foreground.
-                if k > 0 and cumulative_weight > weight_threshold:
-                    break
-
-                if matches[idx]:
-                    is_background = True
-                    break
-                
-            foreground_mask[i, j] = 0 if is_background else 255
-
-    return foreground_mask, diff_square_sum
-
-# Serial builds of the same two kernels: njit compiles `.py_func` again with
-# parallel disabled, so `prange` degrades to `range`.
-update_numba_serial = njit(cache=True)(update_numba_parallel.py_func)
-predict_numba_serial = njit(cache=True)(predict_numba_parallel.py_func)
+    return mask
 
 
-class GMM_CPU_NUMBA:
-    def __init__(self, first_frame: np.ndarray, n_components: int, parallel=False, *arg, **kwargs):
+def warmup(C=3, K=5):
+    """JIT-compile on tiny arrays so benchmarks exclude compilation."""
+    from gmm.mog2_common import kernel_args
+    frame = np.zeros((C, 4, 4), np.float32)
+    mog2_step(frame, np.zeros((K, 4, 4), np.float32),
+              np.zeros((K, C, 4, 4), np.float32), np.zeros((K, 4, 4), np.float32),
+              np.zeros((4, 4), np.uint8), np.zeros((4, 4), np.uint8),
+              *kernel_args(0.01))
 
-        if parallel:
-            self.update_func = update_numba_parallel
-            self.predict_func = predict_numba_parallel
-        else:
-            # Same kernel source, compiled without prange, so parallel=False is
-            # a genuine serial baseline rather than an alias of the parallel one.
-            self.update_func = update_numba_serial
-            self.predict_func = predict_numba_serial
-        
-        self.height, self.width, _ = first_frame.shape
-        
-        self.k_comps = n_components
 
-        # First component mean with the first frame
-        self.means = np.ones(shape=(self.k_comps, 3, self.height, self.width), dtype=np.float32)
-        self.means[0, :, :, :] = first_frame.transpose(2, 0, 1)
-    
-        # All variances to a fixed value
-        self.vars = np.full(shape=(self.k_comps, self.height, self.width), fill_value=INIT_VAR, dtype=np.float32)
-        
-        # Weight of the first component of each pixel is 1.0, the others are 0.0
-        self.weights = np.zeros(shape=(self.k_comps, self.height, self.width), dtype=np.float32)
-        self.weights[0, :, :] = 1.0
+class GMM_CPU_NUMBA(MOG2Base):
+    """Numba-parallel MOG2. Same constructor contract as `GMM_CPU_NUMBA`."""
 
-    def update(self, frame: np.ndarray, mask: np.ndarray, diff_square_sum: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, comp_gen_threshold: np.float32):
-        self.update_func(frame, mask, diff_square_sum, match_threshold, update_alpha, comp_gen_threshold, self.k_comps, self.means, self.vars, self.weights)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        warmup(self.n_channels, self.n_comps)
 
-    def predict(self, frame: np.ndarray, match_threshold: np.float32, weight_threshold: np.float32):
-        mask, diff_square_sum = self.predict_func(frame, match_threshold, weight_threshold, self.k_comps, self.means, self.vars, self.weights)
-        
-        return mask, diff_square_sum
-
-    def step(self, frame: np.ndarray, match_threshold: np.float32, update_alpha: np.float32, weight_threshold: np.float32, comp_gen_threshold: np.float32 = COMP_GEN_THRESHOLD):
-        # Predict step 
-        (mask, diff_square_sum), predict_cost = cpu_timer(self.predict, frame=frame, match_threshold=match_threshold, weight_threshold=weight_threshold)
-
-        # Update step
-        _, update_cost = cpu_timer(self.update, frame=frame, mask=mask, diff_square_sum=diff_square_sum, match_threshold=match_threshold, update_alpha=update_alpha, comp_gen_threshold=comp_gen_threshold)
-
-        # Refine mask
-        # TODO
-
-        return mask, predict_cost + update_cost
+    def _step_kernel(self, frame, args):
+        mog2_step(frame, self.weights, self.means, self.vars,
+                  self.modes, self.mask, *args)
