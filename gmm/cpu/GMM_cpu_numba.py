@@ -62,6 +62,13 @@ def mog2_step(frame, weights, means, vars_, modes, mask,
                 if not fits_pdf:
                     var = vars_[mode, y, x]
                     dist2 = np.float32(0.0)
+
+                    # HELP ME TEST THIS
+                    # dData[0] = means[mode, 0, y, x] - frame[0, y, x]
+                    # dData[1] = means[mode, 1, y, x] - frame[1, y, x]
+                    # dData[2] = means[mode, 2, y, x] - frame[2, y, x]
+                    # dist2 = 0.25*(dData[0]**2) + 1.0*(dData[1]**2) + 1.0*(dData[2]**2)
+
                     for c in range(C):
                         dd = means[mode, c, y, x] - frame[c, y, x]
                         dData[c] = dd

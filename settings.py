@@ -28,7 +28,7 @@ MOG2_CT = np.float32(0.05)                  # complexity reduction: prune = -alp
 
 MOG2_SHADOW_TAU = np.float32(0.5)
 MOG2_SHADOW_VALUE = np.uint8(127)
-MOG2_DETECT_SHADOWS = True
+MOG2_DETECT_SHADOWS = False
 
 FLT_EPSILON = np.float32(1.1920929e-07)
 

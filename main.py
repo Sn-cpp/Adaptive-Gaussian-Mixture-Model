@@ -28,12 +28,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--input_path", type=str, default="0", help="Input source")
-    parser.add_argument("--model", type=int, default=0, help="""
+    parser.add_argument("--model", type=int, default=1, help="""
         Model selection: """ + " | ".join([f"{idx} - {name}" for idx, (name, _) in model_list.items()]))
-    parser.add_argument("--n_components", type=int, default=7, help="Number of Gaussian components per pixel")
-    parser.add_argument("--update_alpha", type=float, default=0.01, help="Updating rate for components")
-    parser.add_argument("--match_threshold", type=float, default=3.5, help="Background matching threshold")
-    parser.add_argument("--weight_threshold", type=float, default=0.7, help="Cumulative weight threshold for components")
     parser.add_argument("--colorspace", type=str, default="bgr", choices=("bgr", "ycrcb"),
                         help="Colorspace the model sees. ycrcb separates luma from chroma "
                              "(+6 to +13 F1 on CDnet highway); display stays BGR either way")
@@ -48,9 +44,6 @@ if __name__ == "__main__":
     if model_list[args.model][1] is None:
         raise ValueError(f"Model {args.model} ({model_list[args.model][0]}) is unavailable — "
                          "its GPU dependency (cupy or numba.cuda) is not installed")
-
-    if not (1 <= args.n_components <= MAX_COMPONENTS):
-        raise ValueError("Invalid number of Gaussian components")
 
 
     # --------------------------------------------------------------------------------------
@@ -75,20 +68,15 @@ if __name__ == "__main__":
     # Model selection
     model_choice = args.model
 
-    # Parameters config
-    gaussian_components = args.n_components
-    update_alpha = np.float32(args.update_alpha)
-    match_threshold = np.float32(args.match_threshold)
-    weight_threshold = np.float32(args.weight_threshold)
-
     # The model can watch a different colorspace than the one we display: the
     # mask is colorspace-agnostic, and the blur composite always uses the BGR
     # frame. YCrCb separates luma from chroma, which measurably cleans up the
     # mask under shadows.
     use_ycrcb = args.colorspace == "ycrcb"
+
     to_model = (lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb)) if use_ycrcb else (lambda f: f)
 
-    model = model_list[model_choice][1](to_model(first_frame), n_components=gaussian_components, parallel=True)
+    model = model_list[model_choice][1](to_model(first_frame), n_components=MOG2_N_COMPONENTS, parallel=True)
 
 
     # --------------------------------------------------------------------------------------
@@ -109,11 +97,11 @@ if __name__ == "__main__":
         # Convert the frame to planar mode (C, H, W)
         planar_frame = to_model(frame).transpose(2, 0, 1).astype(np.float32)
 
-        mask, time_cost = model.step(planar_frame, match_threshold, update_alpha, weight_threshold)
+        mask, time_cost = model.step(planar_frame)
         model_fps = int(1 / max(time_cost, 1e-9))
 
         # MOG2 marks shadows as 127; anything that is not 255 is background.
-        mask = np.where(mask == 255, np.uint8(255), np.uint8(0))
+        # mask = np.where(mask == 255, np.uint8(255), np.uint8(0))
 
         refined_mask = mask_refiner(mask)
         result = background_subtractor(frame, refined_mask)
