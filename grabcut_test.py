@@ -13,6 +13,19 @@ GrabCut look far worse than it is:
   * it reallocated bgdModel/fgdModel every frame, so the colour model relearned
     from scratch and could never converge.
 
+Measured result, CDnet highway, full window 470-1700 (1231 frames), 240p:
+
+    stage             F1     IoU       P       R   ms/frame  empty
+    mask_refiner    0.9344  0.8769  0.9873  0.8869    0.22      0
+    + grabCut       0.9552  0.9142  0.9804  0.9312   31.01      5
+
+So the refinement is real -- +2.1 F1, +3.7 IoU, and it is recall it buys, which
+is the right direction. It costs 141x, and it produces 5 frames whose mask is
+entirely empty where the shipping path produces none. At 1080p the same call is
+~900 ms/frame, so the live pipeline goes from 37 FPS to roughly 1.
+Report the window with the numbers: over 470-669 the same comparison reads
+0.8379 -> 0.9486, because the early frames are the hard ones.
+
 Usage:
     python grabcut_test.py --dataset path/to/highway [--frames 200]
 """
