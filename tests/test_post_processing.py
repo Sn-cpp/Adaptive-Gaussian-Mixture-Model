@@ -97,3 +97,53 @@ class TestPostProcessing:
         # ...and the background really did get blurred (guards against a
         # trivially-passing implementation that just returns the frame).
         assert not np.array_equal(result[mask == 0], frame[mask == 0])
+
+
+class TestPostProcessingPackage:
+    """The post_processing/ backends against OpenCV and against utils/.
+
+    Same arrangement as the GMM models: post_processing/cpu is the plain-Python
+    specification, and it has to agree with the fast path in utils/.
+    """
+
+    def test_erode_matches_opencv(self):
+        from post_processing.cpu.post_processing_cpu import erode2d
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)).astype(np.float64)
+        mask = np.zeros((24, 24), np.uint8)
+        mask[6:18, 6:18] = 255
+        assert np.array_equal(erode2d(mask, k),
+                              cv2.erode(mask, k.astype(np.uint8)))
+
+    def test_dilate_matches_opencv(self):
+        from post_processing.cpu.post_processing_cpu import dilate2d
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)).astype(np.float64)
+        mask = np.zeros((24, 24), np.uint8)
+        mask[6:18, 6:18] = 255
+        assert np.array_equal(dilate2d(mask, k),
+                              cv2.dilate(mask, k.astype(np.uint8)))
+
+    def test_reference_fill_holes_matches_the_fast_one(self):
+        from post_processing.cpu.post_processing_cpu import fill_holes as slow
+        from utils.post_processing import fill_holes as fast
+        mask = np.zeros((24, 24), np.uint8)
+        mask[6:18, 6:18] = 255
+        mask[11:14, 11:14] = 0
+        assert np.array_equal(slow(mask), fast(mask))
+
+    def test_apply_runs_and_keeps_the_foreground(self):
+        from post_processing import PostProcessingCPU
+        rng = np.random.default_rng(0)
+        frame = rng.integers(0, 256, (24, 24, 3), dtype=np.uint8)
+        mask = np.zeros((24, 24), np.uint8)
+        mask[6:18, 6:18] = 255
+        mask[11:14, 11:14] = 0            # a hole, to exercise fill_holes
+
+        pp = PostProcessingCPU()
+        out, seconds = pp.apply(frame, mask)
+
+        assert out.shape == frame.shape and out.dtype == frame.dtype
+        assert seconds >= 0
+        assert pp.refined_mask[12, 12] == 255, "hole was not filled"
+        fg = pp.refined_mask > 0
+        assert np.array_equal(out[fg], frame[fg]), "foreground was blurred"
+        assert not np.array_equal(out[~fg], frame[~fg]), "background was not blurred"
