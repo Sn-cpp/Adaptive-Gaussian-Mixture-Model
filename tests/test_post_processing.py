@@ -51,8 +51,9 @@ class TestPostProcessing:
     def test_mask_refiner_removes_holes_without_inflating(self, small_dims):
         """The property the old CLOSE+dilate recipe failed: no holes, no growth.
 
-        On CDnet highway the old chain scored F1 0.7971 against 0.8929 for this
-        one, because it traded precision away to close holes by brute force.
+        On CDnet highway (frames 470-1700) the old chain scored F1 0.8748
+        against 0.9344 for this one, because it traded precision away to close
+        holes by brute force.
         """
         from utils.post_processing import mask_refiner
         H, W = small_dims

@@ -32,19 +32,26 @@ def mask_refiner(mask: np.ndarray):
     at the call site means turning shadow detection back on cannot silently
     change what the blur composite does.
 
-    Measured on CDnet `highway` (300 scored frames, YCrCb input, ground truth):
+    Measured on CDnet `highway`, the full standard evaluation window (frames
+    470-1700, 1231 scored frames), YCrCb input, GMM_CPU_NUMBA, scoring only
+    ground-truth 0/255 pixels inside the ROI:
 
-        raw MOG2                        F1 0.8133   IoU 0.6853   30.2 holes/frame
-        medianBlur + OPEN + CLOSE x2 + dilate
-                                        F1 0.7971   IoU 0.6627    0.0 holes/frame
-        medianBlur + fill_holes         F1 0.8929   IoU 0.8065    0.0 holes/frame
+                                    F1     IoU      P       R    holes/f  empty
+        raw MOG2                  0.8607  0.7554  0.9032  0.8220   77.2     0
+        OPEN + CLOSE x2 + dilate  0.8748  0.7775  0.8121  0.9480    0.0     6
+        medianBlur + fill_holes   0.9344  0.8769  0.9873  0.8869    0.0     0
 
-    The previous recipe scored *below* doing nothing at all. CLOSE 15x15 twice
-    followed by a 7x7 dilate does remove the holes, but it inflates the
-    silhouette and welds the subject to its own shadow: recall went up (0.79 ->
-    0.89) while precision collapsed (0.84 -> 0.72). Filling holes directly keeps
-    precision instead (0.84 -> 0.99), and costs 2.8 ms/frame at 1080p against
-    4.1 ms for the morphology chain.
+    The morphology chain did remove the holes, but by inflating the silhouette
+    until it swallowed them along with the shadow: precision 0.90 -> 0.81. It
+    also produced 6 frames whose mask was *entirely empty* — for a blur product
+    that means the subject vanishes for a moment, which is far worse than the
+    F1 gap suggests. Filling holes directly keeps precision (0.90 -> 0.99) and
+    never empties the mask, at 2.8 ms/frame at 1080p against 4.1 ms.
+
+    Caveat worth keeping in view: `highway` is small high-contrast cars on grey
+    asphalt, and it is also what `input.mp4` in this repo contains. No person or
+    webcam footage has been scored anywhere in this project, so these numbers
+    describe traffic, not the target application.
     """
     foreground = np.where(mask == 255, np.uint8(255), np.uint8(0))
     return fill_holes(cv2.medianBlur(foreground, 5))
