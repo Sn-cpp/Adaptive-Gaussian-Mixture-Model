@@ -24,7 +24,13 @@ def fill_holes(mask: np.ndarray):
 
 
 def mask_refiner(mask: np.ndarray):
-    """Despeckle, then close the holes MOG2 leaves inside a moving object.
+    """Binarise, despeckle, then close the holes MOG2 leaves inside an object.
+
+    MOG2 writes 127 for shadow when `MOG2_DETECT_SHADOWS` is on, and everything
+    downstream — medianBlur, floodFill, cv2.copyTo — treats any non-zero value
+    as foreground, so a shadow would be kept sharp. Binarising here rather than
+    at the call site means turning shadow detection back on cannot silently
+    change what the blur composite does.
 
     Measured on CDnet `highway` (300 scored frames, YCrCb input, ground truth):
 
@@ -40,7 +46,8 @@ def mask_refiner(mask: np.ndarray):
     precision instead (0.84 -> 0.99), and costs 2.8 ms/frame at 1080p against
     4.1 ms for the morphology chain.
     """
-    return fill_holes(cv2.medianBlur(mask, 5))
+    foreground = np.where(mask == 255, np.uint8(255), np.uint8(0))
+    return fill_holes(cv2.medianBlur(foreground, 5))
 
 def background_subtractor(frame: np.ndarray, mask: np.ndarray):
 

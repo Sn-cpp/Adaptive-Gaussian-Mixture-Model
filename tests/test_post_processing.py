@@ -147,3 +147,17 @@ class TestPostProcessingPackage:
         fg = pp.refined_mask > 0
         assert np.array_equal(out[fg], frame[fg]), "foreground was blurred"
         assert not np.array_equal(out[~fg], frame[~fg]), "background was not blurred"
+
+    def test_mask_refiner_treats_shadow_as_background(self, small_dims):
+        """MOG2 writes 127 for shadow; every downstream step reads non-zero as
+        foreground, so the shadow has to be dropped before any of them run."""
+        from utils.post_processing import mask_refiner
+        H, W = small_dims
+        mask = np.zeros((H, W), np.uint8)
+        mask[10:H - 10, 10:W // 2] = 255      # subject
+        mask[10:H - 10, W // 2:W - 10] = 127  # its shadow, adjacent
+
+        out = mask_refiner(mask)
+
+        assert out[H // 2, W // 2 + 4] == 0, "shadow was kept as foreground"
+        assert out[H // 2, W // 4] == 255, "subject was dropped"

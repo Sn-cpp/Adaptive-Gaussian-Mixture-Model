@@ -17,10 +17,9 @@ if __name__ == "__main__":
         3: ("CuPy RawKernel", GMM_CUPY),
     }
 
-    # Every model reproduces OpenCV's BackgroundSubtractorMOG2. They keep their
-    # own calibrated thresholds (settings.MOG2_*) and ignore --match_threshold /
-    # --weight_threshold; --update_alpha still applies, and a negative value
-    # selects OpenCV's warm-up ramp 1/min(2*nframes, history).
+    # Every model reproduces OpenCV's BackgroundSubtractorMOG2, with its
+    # calibrated thresholds in settings.MOG2_*. A negative update_alpha selects
+    # OpenCV's warm-up ramp 1/min(2*nframes, history), which is the default.
 
 
     # --------------------------------------------------------------------------------------
@@ -100,9 +99,7 @@ if __name__ == "__main__":
         mask, time_cost = model.step(planar_frame)
         model_fps = int(1 / max(time_cost, 1e-9))
 
-        # MOG2 marks shadows as 127; anything that is not 255 is background.
-        # mask = np.where(mask == 255, np.uint8(255), np.uint8(0))
-
+        # mask_refiner binarises: MOG2's shadow value (127) counts as background.
         refined_mask = mask_refiner(mask)
         result = background_subtractor(frame, refined_mask)
 
