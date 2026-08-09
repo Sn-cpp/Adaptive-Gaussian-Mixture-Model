@@ -16,9 +16,7 @@ import pytest
 from gmm import GMM_CPU, GMM_CPU_NUMBA, GMM_CUDA, GMM_CUPY
 
 H, W, K = 32, 40, 5
-MATCH_THRESHOLD = np.float32(3.5)
 UPDATE_ALPHA = np.float32(0.01)
-WEIGHT_THRESHOLD = np.float32(0.7)
 
 CPU_MODELS = [GMM_CPU, GMM_CPU_NUMBA]
 GPU_MODELS = [GMM_CUPY, GMM_CUDA]
@@ -54,8 +52,7 @@ def drive(model_cls, seq):
     masks = []
     for f in seq:
         planar = f.transpose(2, 0, 1).astype(np.float32)
-        mask, cost = model.step(planar, MATCH_THRESHOLD, UPDATE_ALPHA,
-                                WEIGHT_THRESHOLD)
+        mask, cost = model.step(planar, UPDATE_ALPHA)
         masks.append(np.asarray(mask))
         assert cost >= 0, f"{model_cls.__name__}: step() returned a negative cost"
     return masks
@@ -102,15 +99,21 @@ def test_gpu_model_runs(model_cls):
         assert set(np.unique(m)) <= {0, 127, 255}
 
 
-def test_step_accepts_the_optional_fifth_argument():
-    """debug.py passes comp_gen_threshold; every model must tolerate it."""
+def test_step_signature_is_shared():
+    """Every model must accept both `step(frame)` and `step(frame, alpha)`.
+
+    step() was reduced from five parameters to two in fd847ab; callers across
+    main.py, pipeline.py, benchmark.py and debug.py all went stale at once. This
+    pins the surviving shape so the next change breaks here first.
+    """
     seq = frames(n=2)
+    planar = seq[1].transpose(2, 0, 1).astype(np.float32)
     for model_cls in CPU_MODELS:
-        model = model_cls(seq[0], n_components=K, parallel=True)
-        planar = seq[1].transpose(2, 0, 1).astype(np.float32)
-        mask, _ = model.step(planar, MATCH_THRESHOLD, UPDATE_ALPHA,
-                             WEIGHT_THRESHOLD, np.float32(9.0))
-        assert mask.shape == (H, W), model_cls.__name__
+        for args in ((), (UPDATE_ALPHA,)):
+            model = model_cls(seq[0], n_components=K, parallel=True)
+            mask, cost = model.step(planar, *args)
+            assert mask.shape == (H, W), f"{model_cls.__name__} with {len(args)} arg(s)"
+            assert cost >= 0, model_cls.__name__
 
 
 if __name__ == "__main__":

@@ -267,7 +267,7 @@ def test_stationary_object_persists():
         model = GMM_CPU_NUMBA(bg, n_components=MOG2_N_COMPONENTS,
                                    detect_shadows=False)
         n_ours = _absorption_frames(
-            lambda f: model.step(to_planar(f), None, alpha)[0], bg, obj, box)
+            lambda f: model.step(to_planar(f), alpha)[0], bg, obj, box)
 
         theory = math.log(MOG2_BACKGROUND_RATIO) / math.log(1 - alpha)
         print(f"  alpha={alpha:.4f}: ours={n_ours} opencv={n_cv} "
@@ -277,7 +277,7 @@ def test_stationary_object_persists():
 
     # keep showing the object: it must eventually become *the* background
     for _ in range(2000):
-        model.step(to_planar(obj), None, alpha)
+        model.step(to_planar(obj), alpha)
     learned = model.background_image()[box].mean()
     print(f"  learned background inside the box = {learned:.1f} (object = 230)")
     assert learned > 200, f"background model did not absorb the object ({learned:.1f})"

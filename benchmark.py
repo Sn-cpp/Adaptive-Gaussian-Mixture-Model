@@ -145,9 +145,9 @@ if __name__ == "__main__":
             # Predict mask
             mask_mog2 = cv2_gmm.apply(frame)
 
-            mask_cpu, cpu_cost = base_model.step(planar_frame, match_threshold, update_alpha, weight_threshold)
+            mask_cpu, cpu_cost = base_model.step(planar_frame, update_alpha)
 
-            mask_model, model_cost = model.step(planar_frame, match_threshold, update_alpha, weight_threshold)
+            mask_model, model_cost = model.step(planar_frame, update_alpha)
 
             # Post-process masks
             refined_mask_mog2 = mask_refiner(mask_mog2)

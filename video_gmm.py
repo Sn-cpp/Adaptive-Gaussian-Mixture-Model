@@ -43,8 +43,7 @@ def gmm_video(input_path: str, output_path: str, fps: float,
         # The models take planar (C, H, W) float32 frames, and step() returns
         # (mask, seconds).
         planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
-        mask, _ = model.step(planar_frame, match_threshold, update_alpha,
-                             weight_threshold)
+        mask, _ = model.step(planar_frame, update_alpha)
 
         video_writer.write(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
 

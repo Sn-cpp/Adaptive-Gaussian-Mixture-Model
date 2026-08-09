@@ -112,7 +112,7 @@ if __name__ == "__main__":
         # Convert the frame to planar mode (C, H, W) with C=3 (BGR)
         planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
 
-        mask, time_cost = model.step(planar_frame, match_threshold, update_alpha, weight_threshold, 9.0)
+        mask, time_cost = model.step(planar_frame, update_alpha)
         model_fps = int(1/time_cost)
 
         # _, write_cost = cpu_timer(model_fps_graph.write_value, value=model_fps, last_value=last_fps, color=(0, 0, 255))

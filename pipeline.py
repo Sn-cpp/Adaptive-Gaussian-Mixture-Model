@@ -96,7 +96,7 @@ class Pipeline:
         t['convert'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        mask, _ = self.model.step(planar, None, update_alpha, None)
+        mask, _ = self.model.step(planar, update_alpha)
         t['gmm'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
