@@ -35,7 +35,7 @@ def detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
     return False
 
 
-def mog2_step(frame, weights, means, vars_, modes, mask,
+def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
               alpha, prune, Tb, Tg, TB, var_init, var_min, var_max,
               tau, shadow_val, detect_shadows):
     K = weights.shape[0]
@@ -50,6 +50,7 @@ def mog2_step(frame, weights, means, vars_, modes, mask,
             fits_pdf = False
             nmodes = int(modes[y, x])
             total_weight = np.float32(0.0)
+            bg_weight_sum = np.float32(0.0)
 
             mode = 0
             while mode < nmodes:
@@ -66,6 +67,7 @@ def mog2_step(frame, weights, means, vars_, modes, mask,
 
                     if total_weight < TB and dist2 < Tb * var:
                         background = True
+                        bg_weight_sum += weights[mode, y, x]
 
                     if dist2 < Tg * var:
                         fits_pdf = True
@@ -142,6 +144,8 @@ def mog2_step(frame, weights, means, vars_, modes, mask,
 
             modes[y, x] = nmodes
 
+            bg_prob[y, x] = bg_weight_sum
+
             if background:
                 mask[y, x] = 0
             elif detect_shadows and detect_shadow(
@@ -158,4 +162,4 @@ class GMM_CPU(MOG2Base):
 
     def _step_kernel(self, frame, args):
         mog2_step(frame, self.weights, self.means, self.vars,
-                  self.modes, self.mask, *args)
+                  self.modes, self.mask, self.bg_prob, *args)

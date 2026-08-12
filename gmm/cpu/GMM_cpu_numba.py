@@ -37,7 +37,7 @@ def _detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
 
 
 @njit(parallel=True, **_JIT)
-def mog2_step(frame, weights, means, vars_, modes, mask,
+def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
               alpha, prune, Tb, Tg, TB, var_init, var_min, var_max,
               tau, shadow_val, detect_shadows):
     K = weights.shape[0]
@@ -53,6 +53,7 @@ def mog2_step(frame, weights, means, vars_, modes, mask,
             fits_pdf = False
             nmodes = np.int32(modes[y, x])
             total_weight = np.float32(0.0)
+            bg_weight_sum = np.float32(0.0)
 
             mode = 0
             while mode < nmodes:
@@ -76,6 +77,7 @@ def mog2_step(frame, weights, means, vars_, modes, mask,
 
                     if total_weight < TB and dist2 < Tb * var:
                         background = True
+                        bg_weight_sum += weights[mode, y, x]
 
                     if dist2 < Tg * var:
                         fits_pdf = True
@@ -159,6 +161,8 @@ def mog2_step(frame, weights, means, vars_, modes, mask,
 
             modes[y, x] = nmodes
 
+            bg_prob[y, x] = bg_weight_sum
+
             if background:
                 mask[y, x] = 0
             elif detect_shadows and _detect_shadow(
@@ -177,6 +181,7 @@ def warmup(C=3, K=5):
     mog2_step(frame, np.zeros((K, 4, 4), np.float32),
               np.zeros((K, C, 4, 4), np.float32), np.zeros((K, 4, 4), np.float32),
               np.zeros((4, 4), np.uint8), np.zeros((4, 4), np.uint8),
+              np.zeros((4, 4), np.float32),
               *kernel_args(0.01))
 
 
@@ -189,4 +194,4 @@ class GMM_CPU_NUMBA(MOG2Base):
 
     def _step_kernel(self, frame, args):
         mog2_step(frame, self.weights, self.means, self.vars,
-                  self.modes, self.mask, *args)
+                  self.modes, self.mask, self.bg_prob, *args)

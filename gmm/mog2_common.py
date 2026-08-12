@@ -143,6 +143,11 @@ class MOG2Base:
         self.weights = np.zeros((K, H, W), dtype=np.float32)
         self.modes = np.zeros((H, W), dtype=np.uint8)
         self.mask = np.zeros((H, W), dtype=np.uint8)
+        # Background confidence in [0, 1]: the weight of every mode that
+        # matched this pixel inside the background set. Classification
+        # already computes it and used to discard it; keeping it costs one
+        # store and hands the graph cut a data term for free.
+        self.bg_prob = np.zeros((H, W), dtype=np.float32)
 
     def next_args(self, update_alpha=-1.0):
         """Per-frame scalar args — alpha follows OpenCV's warm-up ramp."""
