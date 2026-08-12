@@ -1,5 +1,6 @@
 import numpy as np
 
+
 INIT_VAR = np.float32(15.0)
 REINIT_WEIGHT = np.float32(0.01)
 MAX_COMPONENTS = 20
@@ -13,6 +14,7 @@ COMP_GEN_THRESHOLD = np.float32(9.0)
 # These mirror the OpenCV `BackgroundSubtractorMOG2` defaults exactly, so the
 # models can be compared 1:1 against cv2.
 
+MOG2_COLOR = True
 MOG2_N_COMPONENTS = 5           # nmixtures
 MOG2_HISTORY = 500              # learning rate falls back to 1/history
 
@@ -35,3 +37,22 @@ FLT_EPSILON = np.float32(1.1920929e-07)
 # Background blur
 BLUR_KSIZE = 15
 BLUR_SIGMA = 5.0
+
+# ── GrabCut label constants (OpenCV convention) ──────────────────────────────
+GC_BGD    = np.uint8(0)   # definite background
+GC_FGD    = np.uint8(1)   # definite foreground (unused — no scribbles)
+GC_PR_BGD = np.uint8(2)   # probable background
+GC_PR_FGD = np.uint8(3)   # probable foreground
+
+# ── Pipeline hyper-parameters ─────────────────────────────────────────────────
+GAMMA          = np.float64(50.0)
+LAM_FACTOR     = np.float64(9.0)
+BG_HARD_THRESH = np.float32(0.70)   # bg_prob ≥ this → GC_PR_BGD
+FG_HARD_THRESH = np.float32(0.20)   # bg_prob ≤ this → GC_PR_FGD
+
+PUSH_RELABEL_MAX_ITER     = 200
+PUSH_RELABEL_RELABEL_FREQ = 20
+
+MORPH_CLOSE_RADIUS = 3
+MORPH_OPEN_RADIUS  = 2
+BLUR_KSIZE_DEFAULT = 15
