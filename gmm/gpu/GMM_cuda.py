@@ -52,7 +52,7 @@ def _detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
 
 
 @cuda.jit
-def mog2_step_kernel(frame, weights, means, vars_, modes, mask,
+def mog2_step_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
                      alpha, prune, Tb, Tg, TB, var_init, var_min, var_max,
                      tau, shadow_val, detect_shadows):
     x, y = cuda.grid(2)
@@ -70,6 +70,7 @@ def mog2_step_kernel(frame, weights, means, vars_, modes, mask,
     fits_pdf = False
     nmodes = int32(modes[y, x])
     total_weight = float32(0.0)
+    bg_weight_sum = float32(0.0)
 
     mode = 0
     while mode < nmodes:
@@ -86,6 +87,7 @@ def mog2_step_kernel(frame, weights, means, vars_, modes, mask,
 
             if total_weight < TB and dist2 < Tb * var:
                 background = True
+                bg_weight_sum += weights[mode, y, x]
 
             if dist2 < Tg * var:
                 fits_pdf = True
@@ -168,6 +170,7 @@ def mog2_step_kernel(frame, weights, means, vars_, modes, mask,
             i -= 1
 
     modes[y, x] = nmodes
+    bg_prob[y, x] = bg_weight_sum
 
     if background:
         mask[y, x] = uint8(0)
@@ -185,6 +188,7 @@ class GMM_CUDA(MOG2Base):
     frame). `step_device(d_frame, stream)` keeps everything on the device and is
     what `CUDAPipeline` uses.
     """
+    FILLS_BG_PROB = True
 
     def __init__(self, first_frame, n_components, *arg, **kwargs):
         super().__init__(first_frame, n_components, *arg, **kwargs)
@@ -193,6 +197,7 @@ class GMM_CUDA(MOG2Base):
         self.d_weights = cuda.to_device(self.weights)
         self.d_modes = cuda.to_device(self.modes)
         self.d_mask = cuda.device_array((self.height, self.width), dtype=np.uint8)
+        self.d_bg_prob = cuda.device_array((self.height, self.width), dtype=np.float32)
 
         self.block = (TILE_X, TILE_Y)
         self.grid = ((self.width + TILE_X - 1) // TILE_X,
@@ -202,7 +207,7 @@ class GMM_CUDA(MOG2Base):
         """Enqueue one MOG2 pass; returns the device mask (no synchronisation)."""
         mog2_step_kernel[self.grid, self.block, stream](
             d_frame, self.d_weights, self.d_means, self.d_vars,
-            self.d_modes, self.d_mask, *args)
+            self.d_modes, self.d_mask, self.d_bg_prob, *args)
         return self.d_mask
 
     def _step_kernel(self, frame, args):
@@ -210,6 +215,7 @@ class GMM_CUDA(MOG2Base):
         self.step_device(d_frame, args)
         cuda.synchronize()
         self.d_mask.copy_to_host(self.mask)
+        self.d_bg_prob.copy_to_host(self.bg_prob)
 
     def sync_state(self):
         """Copy the device model back to the host arrays (for the tests)."""

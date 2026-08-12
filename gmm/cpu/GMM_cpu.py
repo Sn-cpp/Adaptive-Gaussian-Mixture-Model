@@ -159,6 +159,7 @@ def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
 
 class GMM_CPU(MOG2Base):
     """Sequential MOG2. Same constructor contract as `GMM_CPU`."""
+    FILLS_BG_PROB = True
 
     def _step_kernel(self, frame, args):
         mog2_step(frame, self.weights, self.means, self.vars,

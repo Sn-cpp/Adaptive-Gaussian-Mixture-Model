@@ -233,6 +233,13 @@ class GrabCutPipeline:
     """
 
     def __init__(self, gmm, roi_rect, gamma=GAMMA, blur_ksize=15):
+        if not getattr(gmm, "FILLS_BG_PROB", False):
+            raise ValueError(
+                f"{type(gmm).__name__} does not fill bg_prob, and the seed for "
+                "the graph cut is derived from it. Driven by such a backend "
+                "this pipeline would silently label every pixel probable "
+                "foreground and segment a field of zeros. Use GMM_CPU, "
+                "GMM_CPU_NUMBA or GMM_CUDA.")
         self.gmm      = gmm
         self.roi_rect = roi_rect
         self.gamma    = float(gamma)

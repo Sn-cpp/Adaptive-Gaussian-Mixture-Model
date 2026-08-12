@@ -155,3 +155,26 @@ def test_all_source_side_when_sink_is_unreachable():
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_pipeline_refuses_a_backend_without_bg_prob():
+    """A backend that leaves bg_prob at zero must be rejected, not tolerated.
+
+    The GC seed is thresholded out of bg_prob, so an all-zero confidence map
+    marks every pixel probable-foreground and the cut segments noise. Silent
+    garbage is the worst failure mode here because the output still looks like
+    a mask.
+    """
+    import numpy as np
+    from graphcut import GrabCutPipeline
+    from gmm.mog2_common import MOG2Base
+
+    class Bogus(MOG2Base):
+        FILLS_BG_PROB = False
+
+        def _step_kernel(self, frame, args):
+            pass
+
+    frame = np.zeros((16, 16, 3), np.uint8)
+    with pytest.raises(ValueError, match="bg_prob"):
+        GrabCutPipeline(Bogus(frame, n_components=5), (0, 0, 16, 16))

@@ -187,6 +187,7 @@ def warmup(C=3, K=5):
 
 class GMM_CPU_NUMBA(MOG2Base):
     """Numba-parallel MOG2. Same constructor contract as `GMM_CPU_NUMBA`."""
+    FILLS_BG_PROB = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

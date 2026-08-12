@@ -109,6 +109,11 @@ def opencv_reference(history=MOG2_HISTORY, var_threshold=MOG2_VAR_THRESHOLD,
 
 
 class MOG2Base:
+    #: Does this backend fill `bg_prob`? A backend that leaves it at zero is
+    #: not broken — the mask is all most callers want — but anything reading
+    #: the confidence must refuse to run rather than segment a field of zeros.
+    FILLS_BG_PROB = False
+
     """State allocation and parameter bookkeeping shared by the three backends.
 
     Subclasses only implement `_step_kernel`. Nothing is ever reallocated after
