@@ -21,6 +21,7 @@ model : (K, 13) float64   — component layout matching grabcut.cpp:
 inv_covs  : (K, 3, 3) float64  — cached inverse covariance matrices
 cov_dets  : (K,)      float64  — cached |cov| for each component
 """
+import cv2
 import numpy as np
 from numba import njit, prange
 
@@ -228,6 +229,7 @@ class GrabCutGMM:
         self._counts = np.zeros(K,         dtype=np.int64)
         self._total  = np.zeros(1,         dtype=np.int64)
         self._comp   = None   # (H, W) int32, allocated on first call
+        self._seeded = False  # has k-means placed the components yet?
 
         # Seed: uniform coefs so the first frame has a valid model
         for ci in range(K):
@@ -236,6 +238,30 @@ class GrabCutGMM:
     def _ensure_comp(self, H, W):
         if self._comp is None or self._comp.shape != (H, W):
             self._comp = np.zeros((H, W), dtype=np.int32)
+
+    def _kmeans_seed(self, frame_bgr_f64, mask_gc, is_fg):
+        """Place the K components with k-means, the way grabcut.cpp initGMMs does.
+
+        Without this the model starts with every mean at the origin and every
+        covariance at zero, so `_assign_components` scores all K components
+        identically and hands every pixel to component 0. The mixture then
+        collapses to a single Gaussian per class and stays there — measured on
+        highway, bg and fg both ended up with counts [N, 0, 0, 0, 0] and means
+        only 24 grey levels apart, which is why the data term carried no signal
+        and the smoothness term decided every cut.
+        """
+        pixel_is_fg = (mask_gc == 1) | (mask_gc == 3)
+        sel = pixel_is_fg if is_fg else ~pixel_is_fg
+        pts = frame_bgr_f64[sel]
+        if pts.shape[0] < K:
+            return False
+
+        crit = (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 10, 1.0)
+        _, labels, _ = cv2.kmeans(pts.astype(np.float32), K, None, crit,
+                                  1, cv2.KMEANS_PP_CENTERS)
+        self._comp[sel] = labels.ravel().astype(np.int32)
+        self._seeded = True
+        return True
 
     def fit(self, frame_bgr_f64, mask_gc, is_fg):
         """Refit GMM from pixels of this class in the current frame.
@@ -247,10 +273,18 @@ class GrabCutGMM:
         H, W = frame_bgr_f64.shape[:2]
         self._ensure_comp(H, W)
 
-        # Step 1: assign each pixel to best component (E-step)
-        _assign_components(frame_bgr_f64, mask_gc,
-                           self.model, self.inv_covs, self.cov_dets,
-                           self._comp)
+        # Step 0: k-means placement, once, and again whenever the mixture has
+        # collapsed onto a single component (which EM cannot recover from —
+        # an empty component has coef 0 and det 0 and never wins a pixel again).
+        live = int(np.count_nonzero(self._counts)) if self._seeded else 0
+        if not self._seeded or live < 2:
+            if not self._kmeans_seed(frame_bgr_f64, mask_gc, is_fg):
+                return
+        else:
+            # Step 1: assign each pixel to best component (E-step)
+            _assign_components(frame_bgr_f64, mask_gc,
+                               self.model, self.inv_covs, self.cov_dets,
+                               self._comp)
 
         # Step 2: accumulate sufficient statistics (M-step numerators)
         _accumulate_stats(frame_bgr_f64, mask_gc, self._comp, is_fg,

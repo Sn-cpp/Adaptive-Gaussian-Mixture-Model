@@ -285,13 +285,25 @@ def push_relabel(cap_src, cap_snk, cap_right, cap_down,
     SOURCE = N
     SINK = N + np.int32(1)
 
-    # Residual capacities (symmetric n-links: both directions stored)
+    # Residual capacities. The n-links are symmetric, so every edge is stored
+    # twice — once from each endpoint. res_left[n] is the arc n -> n-1, and the
+    # capacity of that arc lives in cap_right[n-1], not cap_right[n]; likewise
+    # res_up[n] pairs with cap_down[n-W]. Copying cap_right/cap_down straight
+    # across shifts every reverse arc by one pixel, which silently corrupts the
+    # residual graph and yields a cut above the true minimum.
     res_src   = cap_src.copy()
     res_snk   = cap_snk.copy()
     res_right = cap_right.copy()
     res_down  = cap_down.copy()
-    res_left  = cap_right.copy()   # reverse of right edges
-    res_up    = cap_down.copy()    # reverse of down edges
+    res_left  = np.zeros(N, dtype=np.float32)
+    res_up    = np.zeros(N, dtype=np.float32)
+    for y in range(H):
+        for x in range(W):
+            n = y * W + x
+            if x > 0:
+                res_left[n] = cap_right[n - 1]
+            if y > 0:
+                res_up[n] = cap_down[n - W]
 
     excess       = np.zeros(N + 2, dtype=np.float32)
     height_label = np.zeros(N + 2, dtype=np.int32)
@@ -330,10 +342,20 @@ def push_relabel(cap_src, cap_snk, cap_right, cap_down,
             _bfs_heights_from_sink(res_right, res_down, res_left, res_up,
                                    res_snk, H, W, height_label)
 
-        # Termination check: no active pixel nodes
+        # Termination check: no *pushable* active pixel node left.
+        #
+        # A node at _INF_HEIGHT cannot reach the SINK through the residual
+        # graph, and _push_color_class skips it for exactly that reason. Its
+        # excess is flow that would have to travel back to the SOURCE, which
+        # the second phase of push-relabel does and which the minimum cut does
+        # not depend on. Counting those nodes as active — as this loop used to
+        # — means the loop can never terminate once any excess is stranded, so
+        # it spins out the full max_iter doing no work at all. That is what
+        # made the runtime erratic: 9.3 s at 60x80 against 0.24 s at 120x160,
+        # entirely determined by whether any excess happened to get stranded.
         active = False
         for n in range(N):
-            if excess[n] > np.float32(1e-6):
+            if excess[n] > np.float32(1e-6) and height_label[n] < _INF_HEIGHT:
                 active = True
                 break
         if not active:
