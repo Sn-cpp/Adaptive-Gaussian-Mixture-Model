@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 import cv2
 import numpy as np
+import pytest
 
 from settings import (MOG2_BACKGROUND_RATIO, MOG2_HISTORY, MOG2_N_COMPONENTS,
                       MOG2_VAR_MAX, MOG2_VAR_MIN)
@@ -106,8 +107,7 @@ def test_opencv_parity_real_video():
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
     path = os.path.join(root, 'input.mp4')
     if not os.path.exists(path):
-        print("  input.mp4 not found — skipped")
-        return
+        pytest.skip("input.mp4 not found")
 
     cap = cv2.VideoCapture(path)
     frames = []
@@ -118,8 +118,7 @@ def test_opencv_parity_real_video():
         frames.append(cv2.resize(f, (320, 240)))
     cap.release()
     if len(frames) < 10:
-        print("  video too short — skipped")
-        return
+        pytest.skip("video too short")
 
     mog2 = opencv_reference()
     cv_masks = [mog2.apply(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)) for f in frames]
@@ -160,11 +159,9 @@ def test_cuda_matches_cpu():
     try:
         from gmm.gpu.GMM_cuda import GMM_CUDA, is_available
         if not simulator and not is_available():
-            print("  CUDA unavailable — skipped")
-            return
+            pytest.skip("CUDA unavailable")
     except Exception as e:                                   # pragma: no cover
-        print(f"  CUDA import failed ({e}) — skipped")
-        return
+        pytest.skip(f"CUDA import failed: {e}")
     n, H, W = (3, 8, 8) if simulator else (12, 48, 64)
     _compare_models(GMM_CPU_NUMBA, GMM_CUDA, 'cpu vs cuda', n, H, W)
 
@@ -186,13 +183,10 @@ def _cupy_usable():
 def test_cupy_matches_cpu():
     """The CuPy RawKernel backend against the plain-Python reference.
 
-    Measured on a Colab T4: bit-exact, so this asserts equality. Follows the
-    same print-and-return skip style as test_cuda_matches_cpu so the file still
-    runs directly on CuPy-less machines.
+    Measured on a Colab T4: bit-exact, so this asserts equality.
     """
     if not _cupy_usable():
-        print("  CuPy unavailable — skipped")
-        return
+        pytest.skip("CuPy unavailable")
     from gmm.gpu.GMM_cupy import GMM_CUPY
     _compare_models(GMM_CPU, GMM_CUPY, 'cpu vs cupy')
 
@@ -201,16 +195,13 @@ def test_cupy_matches_numba_cuda():
     """The two GPU backends implement one algorithm through two toolchains
     (CuPy RawKernel vs numba.cuda); a disagreement is a defect in one of them."""
     if not _cupy_usable():
-        print("  CuPy unavailable — skipped")
-        return
+        pytest.skip("CuPy unavailable")
     try:
         from gmm.gpu.GMM_cuda import GMM_CUDA, is_available
         if not is_available():
-            print("  CUDA unavailable — skipped")
-            return
+            pytest.skip("CUDA unavailable")
     except Exception as e:                                   # pragma: no cover
-        print(f"  CUDA import failed ({e}) — skipped")
-        return
+        pytest.skip(f"CUDA import failed: {e}")
     from gmm.gpu.GMM_cupy import GMM_CUPY
     _compare_models(GMM_CUDA, GMM_CUPY, 'numba.cuda vs cupy')
 
@@ -324,13 +315,18 @@ TESTS = [test_opencv_parity_gray, test_opencv_parity_color,
 
 if __name__ == "__main__":
     failed = 0
+    skipped = 0
     for t in TESTS:
         print(f"\n=== {t.__name__}")
         try:
             t()
             print("  PASS")
+        except pytest.skip.Exception as e:
+            skipped += 1
+            print(f"  SKIP: {e}")
         except AssertionError as e:
             failed += 1
             print(f"  FAIL: {e}")
-    print(f"\n{len(TESTS) - failed}/{len(TESTS)} passed")
+    print(f"\n{len(TESTS) - failed - skipped}/{len(TESTS)} passed, "
+          f"{skipped} skipped, {failed} failed")
     sys.exit(1 if failed else 0)

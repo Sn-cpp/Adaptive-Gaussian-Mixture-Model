@@ -1,12 +1,6 @@
 import numpy as np
 
-INIT_VAR = np.float32(15.0)
-REINIT_WEIGHT = np.float32(0.01)
 MAX_COMPONENTS = 20
-
-# Legacy Stauffer-Grimson knob, kept because debug.py still passes it and every
-# model's step() accepts-and-ignores it.
-COMP_GEN_THRESHOLD = np.float32(9.0)
 
 # ------------------------------------------------------------------------------
 # MOG2 model parameters (Zivkovic 2004).

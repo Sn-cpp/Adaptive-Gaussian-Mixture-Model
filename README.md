@@ -25,7 +25,7 @@ single `step()`. `GMM_CUDA` and `GMM_CUPY` implement the same kernel through two
 independent toolchains and are pinned to each other by the test suite.
 
 An earlier Stauffer-Grimson (1999) family (`GMM_CPU`/`GMM_CPU_NUMBA`/
-`GMM_CUPY_V0`/`GMM_CUPY_V1` before commit `a6b1d0f`) was retired: its NumPy
+`GMM_CUPY_V0`/`GMM_CUPY_V1`, retired in `3e1fefa`) was dropped: its NumPy
 baseline was vectorized (not a sequential reference), and its backends had
 drifted apart algorithmically. The git history keeps it.
 
@@ -84,11 +84,15 @@ model = GMM_CPU_NUMBA(first_frame, n_components=5)
 mask, seconds = model.step(to_planar(frame_bgr))   # planar (C, H, W) float32
 ```
 
-`step(frame, match_threshold, update_alpha, weight_threshold) -> (mask, seconds)`
-is the same signature every other model uses, so `main.py` and `benchmark.py`
-drive them all identically. MOG2 accepts and ignores `match_threshold` /
-`weight_threshold` — its `Tb` / `Tg` / `TB` come from `settings.MOG2_*`,
-calibrated to reproduce OpenCV; override them via the constructor.
+`step(frame, update_alpha=-1.0) -> (mask, seconds)` is the signature every
+model uses, so `main.py`, `pipeline.py` and `benchmark.py` drive them all
+identically. `Tb` / `Tg` / `TB` come from `settings.MOG2_*`, calibrated to
+reproduce OpenCV; override them via the constructor.
+
+Every backend also fills `model.bg_prob`, the summed weight of the modes that
+matched inside the background set — a per-pixel background confidence in
+[0, 1] that classification computes anyway. `FILLS_BG_PROB` says whether a
+backend provides it.
 
 Knobs: `color=False` (1-channel grayscale model instead of 3-channel),
 `detect_shadows`, `var_threshold`, `background_ratio`, and `update_alpha` on
@@ -120,13 +124,17 @@ NUMBA_ENABLE_CUDASIM=1 python tests/test_mog2_correctness.py
 
 Against OpenCV MOG2: bit-exact on synthetic sequences, grayscale and colour,
 including `getBackgroundImage`. On real 8-bit video it is also exact on x86-64
-Linux (0/2,304,000 pixels differ on Colab); on macOS arm64 ~0.002% of pixels
-differ (IoU 0.99), because that OpenCV build contracts `acc += d*d` into an FMA
-and rounds once where we round twice.
+Linux (0/2,304,000 pixels differ on Colab); on macOS arm64 10 of 2,304,000
+pixels differ (0.00043%, IoU 0.99989), because that OpenCV build contracts
+`acc += d*d` into an FMA and rounds once where we round twice.
 
-The three MOG2 models agree with each other on masks exactly. CPU vs CUDA state
+All four models agree with each other on masks exactly. CPU vs CUDA state
 arrays differ by at most 8e-6 on a T4, from the same FMA contraction in the GPU
 kernel — well inside the 1e-5 tolerance the suite asserts.
+
+The GPU parity tests **skip** rather than pass when no device is present, so a
+green suite on a laptop is not evidence that the GPU backends agree. Run it on
+a machine with a GPU, or under `NUMBA_ENABLE_CUDASIM=1`, before believing it.
 
 ## Project Structure
 
@@ -141,24 +149,94 @@ kernel — well inside the 1e-5 tolerance the suite asserts.
 │       ├── GMM_cuda.py               # Numba CUDA, state resident on GPU
 │       ├── GMM_cupy.py               # CuPy RawKernel
 │       └── kernels/                  # CUDA .cu kernel files
+├── graphcut/                         # Optional GrabCut refinement (see below)
+│   ├── push_relabel_numba.py         # Parallel push-relabel max-flow
+│   ├── fgd_gmm_numba.py              # Rother-2004 colour GMM, 5 full-covariance components
+│   ├── morph_numba.py                # dilate / erode / largest component
+│   ├── grabcut_numba.py              # Wires them to a MOG2 seed
+│   └── benchmark_push_relabel.py     # Correctness vs Boykov-Kolmogorov + scaling
+├── post_processing/                  # Plain-Python post-processing specification
+│   ├── post_processing_common.py     # PostProcessingBase
+│   └── cpu/post_processing_cpu.py    # Reference median / morphology / hole fill
 ├── utils/
-│   ├── post_processing.py            # Morphological refinement, background blur (OpenCV)
+│   ├── post_processing.py            # Mask refinement, hole filling, blur composite
 │   ├── blur_numba.py                 # Separable blur + morphology (CPU)
 │   ├── blur_cuda.py                  # Same kernels, shared-memory tiled
 │   ├── benchmark.py                  # Timing and mask-quality helpers
+│   ├── iou.py, metric_monitor.py     # Scoring and the live plot benchmark.py draws
+│   ├── gpu_warmup.py                 # CuPy warm-up
 │   └── timer.py                      # CPU/GPU timing utilities
 ├── tests/
 │   ├── conftest.py                   # pytest fixtures + cupy mock
 │   ├── test_mog2_correctness.py      # OpenCV parity, model agreement, stability
 │   ├── test_smoke_models.py          # Every model through main.py's call shape
 │   ├── test_post_processing.py       # Mask refinement + blur composite
+│   ├── test_push_relabel.py          # Max-flow vs PyMaxflow, morphology vs OpenCV
 │   └── test_env.py                   # Environment smoke test
 ├── notebooks/                        # Deliverable notebook
 ├── pipeline.py                       # Pipeline / CUDAPipeline (pinned buffers, 2 streams)
 ├── main.py                           # Webcam/video demo entry point
-├── settings.py                       # Model constants for both families
+├── benchmark.py, debug.py            # Live comparison harnesses (need a display)
+├── video_gmm.py, video_maker.py      # Offline mask video / frames-to-video
+├── mog.py, grabcut_test.py           # cv2.MOG2 and cv2.grabCut reference scripts
+├── settings.py                       # Model constants
 └── requirements.txt
 ```
+
+## What this does not do: a stationary subject
+
+MOG2 detects *motion*, not *people*. Scored on a real 1080p webcam clip
+(`LTSSUD-Test.mp4`, 310 frames, one person seated and waving), the model is
+initialised on frame 0 — which already contains the person — so the subject is
+part of the background from the first second, and only the moving hand is ever
+segmented:
+
+| frames | mean mask coverage |
+|---|---|
+| 0–30 | 3.7% |
+| 80–150 | 9.8% |
+| 150–200 | 24.4% |
+| 200–309 | 11.7% |
+
+129 of 309 frames come back under 5% coverage against a subject occupying
+25–30% of the frame, and the mask averages 96 connected components where a
+person is one. The learning rate is the only lever, and it trades one failure
+for another:
+
+| `update_alpha` | mean coverage | frames < 5% | frames > 60% |
+|---|---|---|---|
+| ramp (default) | 10.6% | 137 | 3 |
+| 0.01 | 5.9% | 171 | 1 |
+| 0.002 | 14.5% | 60 | 3 |
+| 0.0005 | 25.2% | 21 | 27 |
+
+`alpha=0.0005` gets the coverage right and produces a recognisably
+person-shaped mask, at the cost of 27 frames where a camera auto-exposure
+change marks most of the frame. Neither post-processing nor the graph cut can
+repair this, because both only refine a seed and the seed does not contain the
+subject. A clip that starts with an empty room gives MOG2 a real background to
+learn and the problem disappears — which is how background subtraction is meant
+to be used.
+
+## Optional: GrabCut refinement (`graphcut/`)
+
+A second segmentation stage: two full-covariance colour GMMs (Rother 2004)
+seeded from the MOG2 background confidence, cut with a parallel Push-Relabel
+max-flow. `graphcut/benchmark_push_relabel.py` scores the solver against
+Boykov-Kolmogorov (PyMaxflow) — the cut is exact and the labelling identical at
+every size tested.
+
+It is **not** in the default pipeline. On CDnet highway the refinement costs
+141x more than the shipping post-processing (31.0 ms against 0.22 ms per frame
+at 240p, ~900 ms at 1080p) for +2.1 F1, and produces 5 frames out of 1231 whose
+mask is entirely empty where the shipping path produces none.
+
+Push-Relabel parallelises where Boykov-Kolmogorov cannot — push and relabel are
+per-node local operations, while BK maintains two global search trees. On the
+2-vCPU Colab host it beats serial BK outright (2.1x at 60x80, 1.85x at
+240x320). On more cores it stops scaling: the peak is 2 threads at 240x320 and
+4 at 480x640, because each outer iteration launches five `prange` passes and a
+push pass touches only a quarter of the pixels.
 
 ## Behaviour note: foreground persistence
 
