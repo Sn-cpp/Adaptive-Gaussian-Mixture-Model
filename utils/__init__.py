@@ -1,5 +1,6 @@
 from .timer import cpu_timer, gpu_timer
-from .post_processing import mask_refiner, background_subtractor
+from .post_processing import (mask_refiner, background_subtractor,
+                              blur_ksize_for, close_ksize_for, fill_holes)
 from .iou import compute_iou
 from .metric_monitor import Monitor
 

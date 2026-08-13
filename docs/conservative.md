@@ -108,11 +108,22 @@ of the face, those get protected and stay; the interior of a cheek or a shirt
 never changes appearance when it shifts a few pixels, so it is never detected,
 never protected, and stays in the background model where frame 0 put it.
 
-A large morphological CLOSE (21x21 at 480x270) does seal the outline into a
-convincing filled silhouette. It is still the wrong fix: the same operation
-costs precision 0.90 -> 0.81 on `highway` and empties the mask entirely on 6
-frames there. Needing it is a symptom that the seed is wrong, not evidence that
-morphology is right.
+Two things close most of that gap, and both are in `mask_refiner` now —
+`bg_prob` thresholding and a scaled CLOSE. See
+[post-processing.md](post-processing.md); the combination takes coverage on
+this clip from 8.9% to 27.8% against a subject that occupies 25-30%, and cuts
+the frames where the subject has effectively vanished from 137 to 10 of 310.
+What it cannot do is invent the interior when the outline itself is missing,
+which is why the clean plate still matters.
+
+> **Correction.** An earlier version of this file said a large CLOSE "costs
+> precision 0.90 -> 0.81 on highway and empties the mask on 6 frames". That was
+> wrong, and the wrongness mattered: those costs belong to the `OPEN` and the
+> final `dilate` of the old chain, not to the CLOSE. Measured separately,
+> `median + OPEN` scores F1 0.9182 and produces all 6 empty frames on its own,
+> while `median + CLOSE15 + fill` scores 0.9542 with none. A binary closing is
+> extensive — it cannot remove foreground — so it could never have emptied a
+> mask, and the claim should not have survived a moment's thought.
 
 ## Practical consequence
 

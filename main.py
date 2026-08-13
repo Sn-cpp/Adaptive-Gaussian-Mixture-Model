@@ -124,6 +124,13 @@ if __name__ == "__main__":
             model.step(to_planar(frame))
         print("Clean plate done — come back into shot.")
 
+    # A backend that leaves bg_prob at zero would segment a field of zeros, so
+    # ask rather than assume — see MOG2Base.FILLS_BG_PROB.
+    use_bg_prob = type(model).FILLS_BG_PROB
+    close_k = close_ksize_for(first_frame)
+    print(f"Post-processing: {'bg_prob' if use_bg_prob else 'binary mask'} "
+          f"+ median 5 + CLOSE {close_k} + hole fill")
+
     print("Ready")
     while running:
         flag, frame = input_source.read()
@@ -133,12 +140,20 @@ if __name__ == "__main__":
             continue
 
         mask, time_cost = model.step(to_planar(frame))
+        # after step, not before: GMM_CUPY rebinds self.bg_prob to a fresh host
+        # array every frame rather than filling one in place, so a reference
+        # captured earlier would be the previous frame's.
+        bg_prob = model.bg_prob if use_bg_prob else None
         # Not int(): the sequential reference runs below 1 FPS, and the whole
         # point of the comparison is that number. int() rendered it as "0".
         model_fps = 1.0 / max(time_cost, 1e-9)
 
         # mask_refiner binarises: MOG2's shadow value (127) counts as background.
-        refined_mask = mask_refiner(mask)
+        # bg_prob is a better foreground decision than the binary mask (+3.0 F1
+        # on highway) and every backend fills it; the CLOSE bridges the gaps a
+        # person's low-texture interior leaves. Both are measured in its
+        # docstring.
+        refined_mask = mask_refiner(mask, bg_prob=bg_prob, close_ksize=close_k)
         result = background_subtractor(frame, refined_mask)
 
         cv2.putText(result,

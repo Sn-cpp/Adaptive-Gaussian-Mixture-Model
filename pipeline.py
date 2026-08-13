@@ -116,7 +116,7 @@ class Pipeline:
 
         t0 = time.perf_counter()
         if self.morphology:
-            mask = self.blur.morph_open(mask, self.mask_tmp, self.mask_clean)
+            mask = self.blur.morph_close(mask, self.mask_tmp, self.mask_clean)
         t['morph'] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
@@ -199,8 +199,11 @@ class CUDAPipeline:
         mask = self.model.step_device(slot.d_planar, args, stream=st)
 
         if self.morphology:
-            self.bc.erode_kernel[self.grid, self.block, st](mask, self.d_mask_tmp)
-            self.bc.dilate_kernel[self.grid, self.block, st](
+            # dilate then erode = CLOSE. The other order is OPEN, which is the
+            # operation measured on highway as the one that empties masks —
+            # see utils.blur_numba.morph_close.
+            self.bc.dilate_kernel[self.grid, self.block, st](mask, self.d_mask_tmp)
+            self.bc.erode_kernel[self.grid, self.block, st](
                 self.d_mask_tmp, self.d_mask_clean)
             mask = self.d_mask_clean
 
@@ -269,8 +272,8 @@ class CUDAPipeline:
 
             events['morph'][0].record(stream=st)
             if self.morphology:
-                self.bc.erode_kernel[self.grid, self.block, st](mask, self.d_mask_tmp)
-                self.bc.dilate_kernel[self.grid, self.block, st](
+                self.bc.dilate_kernel[self.grid, self.block, st](mask, self.d_mask_tmp)
+                self.bc.erode_kernel[self.grid, self.block, st](
                     self.d_mask_tmp, self.d_mask_clean)
                 mask = self.d_mask_clean
             events['morph'][1].record(stream=st)

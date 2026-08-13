@@ -245,3 +245,88 @@ class TestPipelineGuards:
 
         with pytest.raises(ValueError, match="64x48|48x64"):
             p.process(rng.integers(0, 256, (48, 64, 3), dtype=np.uint8))
+
+
+class TestBgProbDecision:
+    """`bg_prob` replacing MOG2's binary decision — worth +3.0 F1 on highway."""
+
+    def test_bg_prob_threshold_is_stricter_than_the_binary_decision(self):
+        """MOG2 calls a pixel background on *any* match inside the background
+        set, however little weight that mode carries — `background` in the
+        kernel is exactly `bg_prob > 0`. Thresholding at 0.5 demands the
+        matched modes carry half the weight, so it can only ever mark more
+        pixels foreground, never fewer."""
+        from utils.post_processing import mask_refiner
+        from settings import MOG2_BG_PROB_THRESHOLD
+        rng = np.random.default_rng(0)
+        H, W = 40, 50
+        mask = np.where(rng.random((H, W)) < 0.3, np.uint8(255), np.uint8(0))
+        # bg_prob must agree with the mask on which pixels matched nothing
+        bg_prob = np.where(mask == 255, 0.0, rng.random((H, W))).astype(np.float32)
+
+        binary = mask_refiner(mask)
+        graded = mask_refiner(mask, bg_prob=bg_prob)
+        assert (graded[binary == 255] == 255).all(), (
+            "a pixel MOG2 called foreground must stay foreground")
+        assert float(MOG2_BG_PROB_THRESHOLD) > 0.0
+
+    def test_bg_prob_recovers_a_weakly_matched_pixel(self):
+        """The whole point: a pixel that matched a background mode carrying 10%
+        of the weight is background to MOG2 and foreground here."""
+        from utils.post_processing import mask_refiner
+        H, W = 40, 50
+        mask = np.zeros((H, W), np.uint8)          # MOG2: all background
+        bg_prob = np.ones((H, W), np.float32)
+        bg_prob[10:30, 15:35] = 0.1                # ...but weakly so, in a block
+
+        assert not (mask_refiner(mask) == 255).any()
+        graded = mask_refiner(mask, bg_prob=bg_prob)
+        assert (graded[15:25, 20:30] == 255).all()
+
+    def test_close_bridges_a_gap_the_hole_fill_cannot(self):
+        """fill_holes only fills *enclosed* background. An open notch in the
+        silhouette — the gap MOG2 leaves along a low-contrast edge — needs the
+        CLOSE."""
+        from utils.post_processing import mask_refiner
+        H, W = 60, 60
+        mask = np.zeros((H, W), np.uint8)
+        mask[15:45, 15:45] = 255
+        mask[15:30, 28:32] = 0                     # a notch open to the top
+
+        assert mask_refiner(mask)[20, 30] == 0, "not a hole; fill cannot see it"
+        assert mask_refiner(mask, close_ksize=9)[20, 30] == 255
+
+    def test_close_ksize_scales_with_the_frame_and_is_capped(self):
+        from utils.post_processing import close_ksize_for
+        from settings import CLOSE_KSIZE_MAX
+        assert close_ksize_for(np.zeros((240, 320))) == 15
+        assert close_ksize_for(np.zeros((1080, 1920))) <= CLOSE_KSIZE_MAX
+        for h in (120, 240, 480, 720, 1080, 4320):
+            k = close_ksize_for(np.zeros((h, h)))
+            assert k % 2 == 1 and 3 <= k <= CLOSE_KSIZE_MAX
+
+    def test_close_is_extensive_and_cannot_empty_a_mask(self):
+        """The property that makes CLOSE safe where OPEN is not. `median+OPEN`
+        produced 6 entirely empty masks on highway; a CLOSE never can."""
+        from utils.post_processing import mask_refiner
+        rng = np.random.default_rng(3)
+        mask = np.zeros((60, 60), np.uint8)
+        mask[28:32, 28:32] = 255                   # one small blob
+        for k in (0, 5, 9, 15):
+            assert (mask_refiner(mask, close_ksize=k) == 255).any(), (
+                f"CLOSE {k} erased the only foreground")
+
+
+class TestPipelineMorphology:
+
+    def test_pipeline_morphology_is_a_close_not_an_open(self):
+        """An erode-first pass deletes anything thinner than the kernel. A
+        one-pixel-wide arm is exactly that, and the pipelines used to run
+        erode first."""
+        from utils import blur_numba
+        blur_numba.warmup()
+        mask = np.zeros((40, 40), np.uint8)
+        mask[20, 5:35] = 255                       # a one-pixel-wide limb
+        out = blur_numba.morph_close(mask, mask.copy(), mask.copy())
+        assert (out == 255).sum() >= (mask == 255).sum(), (
+            "morphology erased a thin structure — that is an OPEN")

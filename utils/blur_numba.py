@@ -81,20 +81,21 @@ def blur_2d(frame_bgr, out, kernel2d):
 
 
 @njit(parallel=True, **_JIT)
-def morph_open(mask, tmp_mask, out_mask):
-    """3x3 erode then dilate on the foreground (mask == 255)."""
+def morph_close(mask, tmp_mask, out_mask):
+    """3x3 dilate then erode on the foreground (mask == 255).
+
+    CLOSE, not OPEN. The pipelines used to erode first, which is the operation
+    measured on CDnet highway as the one that empties masks: `median + OPEN`
+    scores F1 0.9182 and produces all 6 of the entirely-empty frames the old
+    post-processing chain was blamed for, while a CLOSE of the same size is the
+    second-best refinement measured (see `utils.post_processing.mask_refiner`).
+    An erode-first pass deletes any structure thinner than the kernel outright,
+    and a person's arm at low resolution is exactly that.
+
+    Same two kernels, same cost, opposite order.
+    """
     H = mask.shape[0]
     W = mask.shape[1]
-    for y in prange(H):
-        for x in range(W):
-            v = np.uint8(255)
-            for dy in range(-1, 2):
-                for dx in range(-1, 2):
-                    ny = min(max(y + dy, 0), H - 1)
-                    nx = min(max(x + dx, 0), W - 1)
-                    if mask[ny, nx] != 255:
-                        v = np.uint8(0)
-            tmp_mask[y, x] = v
     for y in prange(H):
         for x in range(W):
             v = np.uint8(0)
@@ -102,8 +103,18 @@ def morph_open(mask, tmp_mask, out_mask):
                 for dx in range(-1, 2):
                     ny = min(max(y + dy, 0), H - 1)
                     nx = min(max(x + dx, 0), W - 1)
-                    if tmp_mask[ny, nx] == 255:
+                    if mask[ny, nx] == 255:
                         v = np.uint8(255)
+            tmp_mask[y, x] = v
+    for y in prange(H):
+        for x in range(W):
+            v = np.uint8(255)
+            for dy in range(-1, 2):
+                for dx in range(-1, 2):
+                    ny = min(max(y + dy, 0), H - 1)
+                    nx = min(max(x + dx, 0), W - 1)
+                    if tmp_mask[ny, nx] != 255:
+                        v = np.uint8(0)
             out_mask[y, x] = v
     return out_mask
 
@@ -117,4 +128,4 @@ def warmup():
     blur_h(bgr, tmp, k1d)
     blur_v_composite(tmp, bgr, mask, out, k1d)
     blur_2d(bgr, out, np.ones((3, 3), np.float32) / 9)
-    morph_open(mask, mask.copy(), mask.copy())
+    morph_close(mask, mask.copy(), mask.copy())

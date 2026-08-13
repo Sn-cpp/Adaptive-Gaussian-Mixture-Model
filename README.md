@@ -180,7 +180,9 @@ a machine with a GPU, or under `NUMBA_ENABLE_CUDASIM=1`, before believing it.
 │   └── timer.py                      # CPU/GPU timing utilities
 ├── docs/
 │   ├── conservative.md               # The stationary subject: diagnosis and fix
-│   └── experiment_cleanplate.py      # Reproduces the table in it
+│   ├── post-processing.md            # Mask refinement ablation, bg_prob vs binary
+│   ├── experiment_cleanplate.py      # Reproduces the table in conservative.md
+│   └── morph_ablation.py, bgprob_sweep.py, compare_all.py, webcam_all.py
 ├── tests/
 │   ├── conftest.py                   # pytest fixtures + cupy mock
 │   ├── test_mog2_correctness.py      # OpenCV parity, model agreement, stability
@@ -234,12 +236,42 @@ before anything runs.
 
 That last row is also the honest limit of `LTSSUD-Test.mp4`, the 1080p clip in
 this repo: the person is seated from frame 0 and never leaves, so no clean plate
-exists and the mask degenerates to an outline of whatever moved. Conservative
-update roughly doubles coverage there (8.9% → 18.1%) and cuts the frames where
-the subject has vanished from 137 to 35 of 310, but the extra pixels are edges,
-not a silhouette. `docs/conservative.md` has the pictures, the cost on
-`highway` (F1 0.9338 → 0.9283, precision traded for recall) and why the large
-morphological CLOSE that *does* seal the outline is the wrong fix.
+exists and the mask degenerates to an outline of whatever moved. Post-processing
+recovers most of the silhouette anyway — coverage 8.9% → 27.8% against a subject
+truly occupying 25–30%, frames with the subject missing 137 → 10 of 310 — but it
+cannot invent an interior where the outline itself is absent.
+`docs/conservative.md` has the pictures and the cost on `highway`
+(F1 0.9338 → 0.9283, precision traded for recall).
+
+## Post-processing
+
+`mask_refiner` — threshold, despeckle, optionally close, fill. On CDnet highway
+470–1700, conservative off:
+
+| stage | F1 | IoU | P | R |
+|---|---:|---:|---:|---:|
+| raw MOG2 | 0.8607 | 0.7554 | 0.9032 | 0.8220 |
+| median + fill_holes | 0.9338 | 0.8758 | 0.9873 | 0.8858 |
+| median + CLOSE 15 + fill | 0.9542 | 0.9123 | 0.9709 | 0.9379 |
+| **bg_prob < 0.5 + median + fill** | **0.9633** | **0.9292** | 0.9418 | 0.9857 |
+| GrabCut refinement, for comparison | 0.9552 | 0.9142 | 0.9804 | 0.9312 |
+
+**`bg_prob` is the change worth knowing about.** MOG2 calls a pixel background
+on *any* match inside the background set, however little weight that mode
+carries — `background` is exactly `bg_prob > 0`. Requiring the matched modes to
+carry half the weight instead is +3.0 F1, is flat between thresholds 0.3 and 0.5,
+costs one comparison per pixel, and beats the graph cut. Every backend already
+computed the value and threw it away.
+
+The old `OPEN + CLOSE ×2 + dilate` chain was rejected for emptying 6 masks and
+wrecking precision, and the CLOSE was blamed for it. That was wrong: `OPEN`
+alone produces all 6 empty frames, the final `dilate` is what costs the
+precision, and a CLOSE on its own is the second-best thing measured.
+`pipeline.py` was running that same erode-first OPEN and now closes instead.
+
+See [docs/post-processing.md](docs/post-processing.md) for the full ablation,
+when the CLOSE helps and when it merges two people into one, and why RECT beats
+ELLIPSE 6× at 1080p.
 
 ## Optional: GrabCut refinement (`graphcut/`)
 
@@ -249,10 +281,12 @@ max-flow. `graphcut/benchmark_push_relabel.py` scores the solver against
 Boykov-Kolmogorov (PyMaxflow) — the cut is exact and the labelling identical at
 every size tested.
 
-It is **not** in the default pipeline. On CDnet highway the refinement costs
-141x more than the shipping post-processing (31.0 ms against 0.22 ms per frame
-at 240p, ~900 ms at 1080p) for +2.1 F1, and produces 5 frames out of 1231 whose
-mask is entirely empty where the shipping path produces none.
+It is **not** in the default pipeline, and the case against it got decisive.
+On CDnet highway it scores F1 0.9552 at 31.0 ms/frame at 240p (~900 ms at
+1080p), with 5 of 1231 masks entirely empty. Thresholding `bg_prob` scores
+**0.9633** for one comparison per pixel and never empties the mask. Almost all
+of the graph cut's gain here was spatial gap closure, which a morphological
+CLOSE also reproduces (0.9542) — not colour modelling or global optimisation.
 
 Push-Relabel parallelises where Boykov-Kolmogorov cannot — push and relabel are
 per-node local operations, while BK maintains two global search trees. On the

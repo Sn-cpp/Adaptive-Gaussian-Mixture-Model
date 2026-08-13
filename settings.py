@@ -40,6 +40,22 @@ MOG2_CONSERVATIVE_UPDATE = False
 
 FLT_EPSILON = np.float32(1.1920929e-07)
 
+# Post-processing
+#
+# A pixel counts as background only if the background modes it matched carry at
+# least this much of the weight. MOG2's own rule is the degenerate case of this
+# one, `bg_prob > 0` — any match at all, however weak the mode. Requiring real
+# weight rejects matches against spurious low-weight modes and is worth
+# +3.0 F1 on CDnet highway. See `mask_refiner`.
+MOG2_BG_PROB_THRESHOLD = np.float32(0.5)
+
+# Morphological CLOSE kernel, as a fraction of frame height (15 px at 240p).
+# Closes the gaps MOG2 leaves inside a large low-texture object. Capped because
+# the cost grows with the kernel and because a kernel wider than the gaps
+# between two people merges them into one blob.
+CLOSE_KSIZE_FRACTION = 0.0625
+CLOSE_KSIZE_MAX = 61
+
 # Background blur
 BLUR_KSIZE = 15
 BLUR_SIGMA = 5.0

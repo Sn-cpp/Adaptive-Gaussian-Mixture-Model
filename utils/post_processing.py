@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 
+from settings import (CLOSE_KSIZE_FRACTION, CLOSE_KSIZE_MAX,
+                      MOG2_BG_PROB_THRESHOLD)
+
 # --------------------------------------------------------------------------------------
 
 def fill_holes(mask: np.ndarray):
@@ -32,7 +35,21 @@ def fill_holes(mask: np.ndarray):
     return mask | holes
 
 
-def mask_refiner(mask: np.ndarray):
+def close_ksize_for(frame: np.ndarray):
+    """CLOSE kernel scaled to the frame, odd, capped — see `CLOSE_KSIZE_FRACTION`.
+
+    The gaps to be closed scale with the apparent size of the object, not with
+    the pixel grid, so a kernel tuned at 240p is nearly useless at 1080p. This
+    is linear in frame height, the same rule `blur_ksize_for` uses, which holds
+    only while the framing is comparable — a webcam at arm's length and a
+    traffic camera are not, and neither is a person who walks towards the lens.
+    """
+    k = int(round(CLOSE_KSIZE_FRACTION * frame.shape[0]))
+    return max(3, min(k | 1, CLOSE_KSIZE_MAX))
+
+
+def mask_refiner(mask: np.ndarray, bg_prob: np.ndarray = None,
+                 close_ksize: int = 0):
     """Binarise, despeckle, then close the holes MOG2 leaves inside an object.
 
     MOG2 writes 127 for shadow when `MOG2_DETECT_SHADOWS` is on, and everything
@@ -41,22 +58,61 @@ def mask_refiner(mask: np.ndarray):
     at the call site means turning shadow detection back on cannot silently
     change what the blur composite does.
 
+    `bg_prob`, when given, replaces MOG2's binary decision with a threshold on
+    the background confidence the kernel already computes. `close_ksize > 1`
+    inserts a morphological CLOSE before the hole fill; use `close_ksize_for`
+    to scale it to the frame.
+
     Measured on CDnet `highway`, the full standard evaluation window (frames
-    470-1700, 1231 scored frames), YCrCb input, GMM_CPU_NUMBA, scoring only
-    ground-truth 0/255 pixels inside the ROI:
+    470-1700, 1231 scored frames), YCrCb input, GMM_CPU_NUMBA, conservative
+    update off, scoring only ground-truth 0/255 pixels inside the ROI:
 
-                                    F1     IoU      P       R    holes/f  empty
-        raw MOG2                  0.8607  0.7554  0.9032  0.8220   75.8     0
-        OPEN + CLOSE x2 + dilate  0.8748  0.7775  0.8121  0.9480    0.0     6
-        medianBlur + fill_holes   0.9338  0.8758  0.9873  0.8858    0.0     0
+                                    F1     IoU      P       R    empty
+        raw MOG2                  0.8607  0.7554  0.9032  0.8220    0
+        median only               0.9248  0.8602  0.9872  0.8699    0
+        median + fill_holes       0.9338  0.8758  0.9873  0.8858    0
+        + CLOSE 15 (ellipse)      0.9542  0.9123  0.9709  0.9379    0
+        bg_prob<0.5, median, fill 0.9633  0.9292  0.9418  0.9857    0
+        bg_prob<0.3, median, fill 0.9636  0.9297  0.9434  0.9847    0
 
-    The morphology chain scores a little above raw MOG2 on F1, but it gets
-    there by inflating the silhouette until it swallows the holes along with
-    the shadow: precision 0.90 -> 0.81. It also produced 6 frames whose mask
-    was *entirely empty* — for a blur product that means the subject vanishes
-    for a moment, which is far worse than the F1 gap suggests. Filling holes
-    directly keeps precision (0.90 -> 0.99) and never empties the mask, at
-    2.8 ms/frame at 1080p against 4.1 ms.
+    Two findings there, both worth more than they look.
+
+    **bg_prob beats the binary decision by 3.0 F1, for free.** MOG2 calls a
+    pixel background if the first mode it matches lies inside the background
+    set — any match, however little weight that mode carries. `bg_prob` is the
+    summed weight of every background mode that matched, so `background` in the
+    kernel is exactly `bg_prob > 0`. Thresholding at 0.5 instead demands that
+    the matched modes carry half the weight, which throws out matches against
+    spurious low-weight modes. Recall 0.886 -> 0.986 at a precision cost of
+    0.987 -> 0.942. The result is flat between 0.3 and 0.5, so it is not tuned
+    to a knife edge, and the value was already being computed and discarded.
+    For reference the GrabCut refinement in `graphcut/` scores F1 0.9552 at
+    31 ms/frame; this beats it at the cost of one comparison per pixel.
+
+    **A CLOSE helps; the OPEN was what was hurting.** The old
+    `OPEN + CLOSE x2 + dilate` chain scored 0.8748 with 6 entirely empty masks,
+    and that damage is not the CLOSE: `median + OPEN` alone scores 0.9182 and
+    produces all 6 of those empty frames, while the final dilate is what drops
+    precision to 0.81. A CLOSE on its own is the second-best thing measured
+    here. This is why the pipelines' morphology was flipped from OPEN to CLOSE
+    as well — see `utils.blur_numba.morph_close`.
+
+    **The CLOSE is off unless the caller asks.** Its kernel has to be small
+    against the *object*, and `close_ksize_for` can only scale it against the
+    *frame*. On a webcam those are close enough — a seated person fills half
+    the height — and the CLOSE is worth a great deal: on `LTSSUD-Test.mp4` at
+    480x270 with conservative update on, `bg_prob` alone gives 19.4% mask
+    coverage against a subject that really occupies 25-30%, with 29 of 310
+    frames essentially empty and 55 connected components; adding CLOSE 17 gives
+    27.8% coverage, 10 empty frames and 10 components. On `highway` those same
+    two scales are nothing alike — a car is ~20 px in a 240 px frame, so a
+    15 px kernel is most of a car — and the CLOSE drops F1 from 0.9633 to
+    0.9316. `main.py` turns it on because it is a webcam application; the CDnet
+    scoring path leaves it off.
+
+    A CLOSE wider than the gap between two objects merges them, and F1 hides
+    it — a 15x15 CLOSE across a 10-pixel aisle between two people fills 98.6%
+    of the aisle while F1 stays near 0.96. Keep `CLOSE_KSIZE_MAX` in view.
 
     Caveat worth keeping in view: `highway` is small high-contrast cars on grey
     asphalt, and it is also what `input.mp4` in this repo contains. These
@@ -64,8 +120,21 @@ def mask_refiner(mask: np.ndarray):
     `docs/conservative.md` for what happens on webcam footage, where the
     limiting factor is not post-processing at all.
     """
-    foreground = np.where(mask == 255, np.uint8(255), np.uint8(0))
-    return fill_holes(cv2.medianBlur(foreground, 5))
+    if bg_prob is not None:
+        foreground = np.where(bg_prob < MOG2_BG_PROB_THRESHOLD,
+                              np.uint8(255), np.uint8(0))
+    else:
+        foreground = np.where(mask == 255, np.uint8(255), np.uint8(0))
+
+    refined = cv2.medianBlur(foreground, 5)
+    if close_ksize > 1:
+        # RECT, not ELLIPSE: 0.9516 against 0.9542 on highway, but 3.6 ms
+        # against 22.3 ms at 1080p with a 61-wide kernel, because OpenCV
+        # decomposes a rectangle into two 1-D passes and cannot do that for an
+        # ellipse. The same separability argument as the Gaussian blur.
+        el = cv2.getStructuringElement(cv2.MORPH_RECT, (close_ksize, close_ksize))
+        refined = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, el, iterations=1)
+    return fill_holes(refined)
 
 def blur_ksize_for(frame: np.ndarray, reference_height: int = 240,
                    reference_ksize: int = 15):
