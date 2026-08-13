@@ -34,6 +34,39 @@ class TestPostProcessing:
         outside[8:H - 8, 8:W - 8] = False
         assert not filled[outside].any(), "fill_holes inflated the mask"
 
+    def test_fill_holes_when_the_subject_touches_the_top_left_corner(self, small_dims):
+        """Seeding the flood at pixel (0, 0) only works while that corner is
+        background. A shoulder in the top-left of a webcam frame put foreground
+        there, the flood could not start, nothing was reachable, and the
+        complement was the whole image — every pixel declared foreground, so
+        nothing got blurred at all."""
+        from utils.post_processing import fill_holes
+        H, W = small_dims
+        mask = np.zeros((H, W), np.uint8)
+        mask[0:H // 2, 0:W // 2] = 255            # block anchored at (0, 0)
+
+        filled = fill_holes(mask)
+
+        assert int((filled > 0).sum()) == int((mask > 0).sum()), (
+            f"grew from {int((mask > 0).sum())} to {int((filled > 0).sum())} px "
+            "— the flood never started")
+        assert filled[H - 1, W - 1] == 0, "far corner must stay background"
+
+    def test_fill_holes_matches_the_plain_python_spec_on_edge_cases(self):
+        """post_processing/cpu seeds from every border pixel; utils must agree
+        with it, including on the cases that used to diverge."""
+        from utils.post_processing import fill_holes as fast
+        from post_processing.cpu.post_processing_cpu import fill_holes as spec
+        cases = {}
+        m = np.zeros((16, 16), np.uint8); m[0:8, 0:8] = 255
+        cases["corner is foreground"] = m
+        cases["all foreground"] = np.full((16, 16), 255, np.uint8)
+        cases["all background"] = np.zeros((16, 16), np.uint8)
+        m = np.zeros((16, 16), np.uint8); m[2:14, 2:14] = 255; m[5:11, 5:11] = 0
+        cases["ring with a hole"] = m
+        for name, mask in cases.items():
+            assert np.array_equal(fast(mask), spec(mask)), name
+
     def test_fill_holes_leaves_background_connected_to_the_border(self, small_dims):
         """A concave notch open to the outside is background, not a hole."""
         from utils.post_processing import fill_holes

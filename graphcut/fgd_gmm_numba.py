@@ -256,6 +256,12 @@ class GrabCutGMM:
         if pts.shape[0] < K:
             return False
 
+        # KMEANS_PP_CENTERS draws from OpenCV's global RNG, so the same frame
+        # segmented differently on every run and no result here was
+        # reproducible. Pin it: nothing else in this project uses that RNG, and
+        # a segmentation that changes when you look at it twice cannot be
+        # measured against ground truth.
+        cv2.setRNGSeed(0)
         crit = (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 10, 1.0)
         _, labels, _ = cv2.kmeans(pts.astype(np.float32), K, None, crit,
                                   1, cv2.KMEANS_PP_CENTERS)

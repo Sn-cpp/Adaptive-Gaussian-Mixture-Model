@@ -23,6 +23,8 @@ Reference
 ---------
 grabcut.cpp (OpenCV), constructGCGraph(), assignGMMsComponents(), learnGMMs().
 """
+import warnings
+
 import numpy as np
 from numba import njit, prange
 
@@ -36,8 +38,15 @@ GAMMA = np.float64(50.0)
 # lambda = 9 * gamma  (Rother 2004, Eq. 7)
 LAM_FACTOR = np.float64(9.0)
 
-PUSH_RELABEL_MAX_ITER     = 200
-PUSH_RELABEL_RELABEL_FREQ = 20
+# Convergence takes roughly one outer iteration per pixel of image diameter:
+# measured 119 at 60x80, 783 at 240x320, 1027 at 480x640. A fixed 200 was
+# therefore fine on the tiny test grids and silently returned a 0%-correct
+# labelling at 240x320 and above, which is the size this actually runs at.
+# Scale with (H + W) and keep a wide margin; the loop exits on convergence, so
+# a generous cap costs nothing when it is not needed.
+PUSH_RELABEL_ITER_PER_DIAMETER = 8
+PUSH_RELABEL_MIN_ITER          = 1000
+PUSH_RELABEL_RELABEL_FREQ      = 20
 
 # MOG2 bg_prob threshold for deriving the initial GC label map
 BG_HARD_THRESH  = np.float32(0.70)   # above → GC_PR_BGD
@@ -174,8 +183,17 @@ def _build_tlinks(gc_mask, nlp_bg, nlp_fg, lam, cap_src, cap_snk):
             else:                         # GC_PR_BGD or GC_PR_FGD — soft
                 # fromSource = -log(bgGMM(color))
                 # toSink     = -log(fgGMM(color))
-                cap_src[n] = nlp_bg[y, x]
-                cap_snk[n] = nlp_fg[y, x]
+                #
+                # Clamped at zero: the GMM density is unnormalised —
+                # coef/sqrt(det) * exp(...) with no (2*pi)^(3/2) — so a tight
+                # component (det driven to the 1e-6 singular floor) returns a
+                # value above 1 and -log of it is negative. Max-flow is only
+                # defined for non-negative capacities; a negative one makes
+                # push-relabel return a cut that is not minimal, silently.
+                src = nlp_bg[y, x]
+                snk = nlp_fg[y, x]
+                cap_src[n] = src if src > np.float32(0.0) else np.float32(0.0)
+                cap_snk[n] = snk if snk > np.float32(0.0) else np.float32(0.0)
 
 
 # ── N-link builder ───────────────────────────────────────────────────────────
@@ -240,6 +258,9 @@ class GrabCutPipeline:
                 "this pipeline would silently label every pixel probable "
                 "foreground and segment a field of zeros.")
         self.gmm      = gmm
+        self._max_iter = max(PUSH_RELABEL_MIN_ITER,
+                             PUSH_RELABEL_ITER_PER_DIAMETER * (gmm.height + gmm.width))
+        self._warned_no_convergence = False
         self.roi_rect = roi_rect
         self.gamma    = float(gamma)
         H, W = gmm.height, gmm.width
@@ -347,12 +368,20 @@ class GrabCutPipeline:
                       H, W, self._cap_right, self._cap_down)
 
         # ── Stage 7: Push-Relabel ────────────────────────────────────────────
-        labeling = push_relabel(
+        labeling, iterations = push_relabel(
             self._cap_src, self._cap_snk,
             self._cap_right, self._cap_down,
             H, W,
-            PUSH_RELABEL_MAX_ITER, PUSH_RELABEL_RELABEL_FREQ,
+            self._max_iter, PUSH_RELABEL_RELABEL_FREQ,
         )
+        if iterations >= self._max_iter:
+            # Not a minimal cut. Say so once rather than emit a plausible mask.
+            if not self._warned_no_convergence:
+                warnings.warn(
+                    f"push_relabel hit its {self._max_iter}-iteration cap at "
+                    f"{W}x{H}; the cut is not minimal. Raise "
+                    f"PUSH_RELABEL_ITER_PER_DIAMETER.", RuntimeWarning, stacklevel=2)
+                self._warned_no_convergence = True
 
         # Our PR returns 1 for SINK-reachable (background side).
         # Invert so that foreground pixels = 255.

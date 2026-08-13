@@ -114,7 +114,7 @@ def main():
         times = []
         for _ in range(3):
             t = time.perf_counter()
-            labeling = push_relabel(*caps, np.int32(H), np.int32(W), 20000, 20)
+            labeling, _ = push_relabel(*caps, np.int32(H), np.int32(W), 20000, 20)
             times.append(time.perf_counter() - t)
         pr_ms = np.median(times) * 1000
 
@@ -124,10 +124,15 @@ def main():
             flow, seg = reference(*caps, H, W)
             bk_ms = (time.perf_counter() - t) * 1000
             ours = cut_value(labeling, *caps, H, W)
-            exact = abs(ours - flow) < 1e-3 * max(1.0, abs(flow))
+            agree = (labeling == seg).mean()
+            # 1e-3 relative is 266 units of slack on a cut of 266364 — wide
+            # enough to print "exact" for a cut that was 74 above the minimum
+            # and disagreed with BK on every single pixel. Require float32
+            # round-off only, and require the labelling to match as well.
+            exact = abs(ours - flow) < 1e-6 * max(1.0, abs(flow)) and agree == 1.0
             row += (f" {bk_ms:9.1f} {bk_ms / pr_ms:8.2f}x "
                     f"{'exact' if exact else 'ABOVE MIN':>10s} "
-                    f"{(labeling == seg).mean() * 100:7.2f}%")
+                    f"{agree * 100:7.2f}%")
         print(row)
 
 

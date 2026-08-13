@@ -11,6 +11,14 @@ def fill_holes(mask: np.ndarray):
     this fills a hole of any size and shape without growing the silhouette, and
     it cannot bridge two separate objects.
 
+    The flood starts from a one-pixel background border added around the frame,
+    not from pixel (0, 0). Seeding at (0, 0) only works while that corner
+    happens to be background: when the subject touches it — a shoulder in the
+    top-left of a webcam frame — the flood cannot start, nothing is reachable,
+    and the complement is the entire image, so the whole frame is declared
+    foreground. Padding makes every border-adjacent background region reachable
+    by construction, whatever the corner holds.
+
     The flood is sequential. A data-parallel equivalent exists (morphological
     reconstruction of the border marker) but it needs one dilate per pixel of
     propagation distance -- 512 iterations at 1080p, measured at 344 ms against
@@ -18,9 +26,10 @@ def fill_holes(mask: np.ndarray):
     GPU pipeline.
     """
     h, w = mask.shape
-    flooded = mask.copy()
-    cv2.floodFill(flooded, np.zeros((h + 2, w + 2), np.uint8), (0, 0), 255)
-    return mask | cv2.bitwise_not(flooded)
+    padded = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    cv2.floodFill(padded, np.zeros((h + 4, w + 4), np.uint8), (0, 0), 255)
+    holes = cv2.bitwise_not(padded)[1:h + 1, 1:w + 1]
+    return mask | holes
 
 
 def mask_refiner(mask: np.ndarray):

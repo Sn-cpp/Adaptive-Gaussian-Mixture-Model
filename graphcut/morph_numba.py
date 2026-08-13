@@ -35,7 +35,16 @@ def _dilate(mask_in, mask_out, H, W, radius):
 
 @njit(parallel=True, cache=True)
 def _erode(mask_in, mask_out, H, W, radius):
-    """Binary erosion: output[y,x]=255 iff ALL neighbors within `radius` are 255."""
+    """Binary erosion: output[y,x]=255 iff ALL in-bounds neighbours are non-zero.
+
+    Out-of-bounds positions are skipped, not counted as background. Counting
+    them as background — which this did — erodes a `radius`-wide frame off
+    every edge unconditionally, so `morphological_close` stopped being
+    extensive: a subject touching the edge of the frame, which is most of them
+    on a webcam, lost that border every time the mask was closed. OpenCV's
+    default BORDER_CONSTANT with a morphological border value behaves the same
+    way as this fix for erosion.
+    """
     for y in prange(H):
         for x in range(W):
             all_fg = True
@@ -43,11 +52,12 @@ def _erode(mask_in, mask_out, H, W, radius):
                 if not all_fg:
                     break
                 ny = y + dy
+                if ny < 0 or ny >= H:
+                    continue
                 for dx in range(-radius, radius + 1):
                     nx = x + dx
-                    if ny < 0 or ny >= H or nx < 0 or nx >= W:
-                        all_fg = False   # treat out-of-bounds as background
-                        break
+                    if nx < 0 or nx >= W:
+                        continue
                     if mask_in[ny, nx] == np.uint8(0):
                         all_fg = False
                         break
@@ -72,6 +82,17 @@ def largest_component(mask, H, W):
 
     Returns a new (H, W) uint8 mask containing only the biggest blob.
     Use when the scene has one dominant foreground object.
+
+    Foreground is any non-zero pixel, tested the same way when seeding a
+    component and when growing it. The two used to disagree — seeded on != 0
+    but grown on == 255 — so a mask carrying any other non-zero value, which is
+    what every intermediate morphology buffer here holds, broke into
+    single-pixel components and the "largest" one was one pixel.
+
+    An all-background mask returns all background. It used to return an
+    all-foreground frame instead: with no component found, best_lbl stayed 0,
+    and 0 is also the value `visited` holds for every pixel nobody visited, so
+    the output loop matched everywhere.
     """
     visited  = np.zeros((H, W), dtype=np.int32)
     queue    = np.empty(H * W, dtype=np.int32)
@@ -99,7 +120,7 @@ def largest_component(mask, H, W):
                     ny = ny0 + DY[d]
                     nx = nx0 + DX[d]
                     if 0 <= ny < H and 0 <= nx < W:
-                        if mask[ny, nx] == np.uint8(255) and visited[ny, nx] == 0:
+                        if mask[ny, nx] != np.uint8(0) and visited[ny, nx] == 0:
                             visited[ny, nx] = label_id
                             queue[tail] = ny * W + nx
                             tail += np.int32(1)
@@ -109,6 +130,8 @@ def largest_component(mask, H, W):
                 best_lbl = label_id
 
     out = np.zeros((H, W), dtype=np.uint8)
+    if best_lbl == np.int32(0):
+        return out                      # no foreground at all
     for y in range(H):
         for x in range(W):
             if visited[y, x] == best_lbl:

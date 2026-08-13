@@ -193,8 +193,14 @@ def _push_color_class(row_par, col_par, H, W,
             if res_snk[n] > np.float32(0.0) and height_label[SINK] == hn - 1:
                 delta = excess[n] if excess[n] < res_snk[n] else res_snk[n]
                 res_snk[n] -= delta
-                excess[SINK] += delta
                 excess[n] -= delta
+                # excess[SINK] is deliberately not accumulated here. Every
+                # thread in this prange would be updating the same scalar, and
+                # a non-atomic += loses updates — measured at 3280 against an
+                # expected 4000 on 10 threads. Nothing reads it: termination
+                # scans pixel nodes only, and the labelling comes from the
+                # final BFS. The max-flow value, if anyone wants it, is the cut
+                # weight and follows from the labelling.
 
 
 @njit(parallel=True, cache=True)
@@ -280,6 +286,12 @@ def push_relabel(cap_src, cap_snk, cap_right, cap_down,
     -------
     labeling : (H*W,) int32
         0 = SOURCE side (background), 1 = SINK side (foreground)
+    iterations : int
+        Outer iterations actually run. Equal to `max_iter` means the cap was
+        hit and the cut is NOT minimal — check it. Convergence needs roughly
+        one iteration per pixel of image diameter: measured 119 at 60x80, 783
+        at 240x320 and 1027 at 480x640, so a fixed cap of 200 silently
+        returned a 0%-correct labelling at 240x320 and above.
     """
     N = np.int32(H * W)
     SOURCE = N
@@ -322,6 +334,7 @@ def push_relabel(cap_src, cap_snk, cap_right, cap_down,
     excess[SOURCE] = -total_src
 
     # PR-3: main push-relabel loop
+    iterations = max_iter
     for iteration in range(max_iter):
         # Four color-class push passes (checkerboard, race-free)
         _push_color_class(0, 0, H, W, excess, height_label,
@@ -359,6 +372,7 @@ def push_relabel(cap_src, cap_snk, cap_right, cap_down,
                 active = True
                 break
         if not active:
+            iterations = iteration + 1
             break
 
     # PR-4: final global relabeling to get accurate residual reachability,
@@ -373,7 +387,7 @@ def push_relabel(cap_src, cap_snk, cap_right, cap_down,
     for n in range(N):
         if height_label[n] < _INF_HEIGHT:
             labeling[n] = np.int32(1)   # reachable from SINK → foreground
-    return labeling
+    return labeling, iterations
 
 
 def warmup_push_relabel():
