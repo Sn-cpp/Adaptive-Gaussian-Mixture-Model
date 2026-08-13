@@ -24,6 +24,20 @@ MOG2_SHADOW_TAU = np.float32(0.5)
 MOG2_SHADOW_VALUE = np.uint8(127)
 MOG2_DETECT_SHADOWS = False
 
+# Conservative (foreground-protected) update — ViBe's rule, Barnich & Van
+# Droogenbroeck 2011: a pixel only feeds the background model if it was
+# classified *background*. Zivkovic's MOG2 updates every pixel unconditionally,
+# so a subject that holds still is absorbed into the background within a few
+# seconds and stops being detected. That is the single biggest quality problem
+# on webcam footage, and no amount of post-processing repairs it — the mask it
+# would refine no longer contains the person.
+#
+# Off by default: with it on the models no longer reproduce cv2's
+# BackgroundSubtractorMOG2, and that parity is what the correctness tests
+# assert. `main.py` turns it on, because there the target is a person rather
+# than a moving car. See `MOG2Base.__init__` for the exact semantics.
+MOG2_CONSERVATIVE_UPDATE = False
+
 FLT_EPSILON = np.float32(1.1920929e-07)
 
 # Background blur

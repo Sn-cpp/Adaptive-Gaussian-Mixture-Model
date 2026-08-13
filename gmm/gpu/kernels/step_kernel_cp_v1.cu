@@ -60,8 +60,8 @@ extern "C" __global__ void step_gmm(
     float* bg_prob,
     const float FLT_EPS,
     const int H, const int W, const int C, const int K,
-    const float alpha,
-    const float prune,
+    const float alpha_in,
+    const float prune_in,
     const float Tb,
     const float Tg,
     const float TB,
@@ -70,7 +70,8 @@ extern "C" __global__ void step_gmm(
     const float var_max,
     const float tau,
     const unsigned char shadow_val,
-    const bool detect_shadows) {
+    const bool detect_shadows,
+    const bool conservative) {
         // Thread coordinating values
         int x = blockIdx.x * blockDim.x + threadIdx.x;
         int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -80,7 +81,7 @@ extern "C" __global__ void step_gmm(
 
         // Pre-computed constant
         int num_pixels = H * W;
-        float alpha1 = 1.0 - alpha;
+        float alpha1_in = 1.0 - alpha_in;
 
         // Local buffer
         float dData[N_CHANNELs];
@@ -89,10 +90,24 @@ extern "C" __global__ void step_gmm(
         for (int yy = y; yy < H; yy += stride_y)
             for (int xx = x; xx < W; xx += stride_x) {
                 int i = yy * W + xx;
+
+                // Conservative update -- see GMM_cpu.mog2_step. mask[i] still
+                // holds the previous frame's decision for this pixel. Note the
+                // grid-stride loop: alpha has to be recomputed per pixel here,
+                // not hoisted above the loop.
+                float alpha = alpha_in;
+                float prune = prune_in;
+                float alpha1 = alpha1_in;
+                if (conservative && mask[i] == 255) {
+                    alpha = 0.0f;
+                    prune = 0.0f;
+                    alpha1 = 1.0f;
+                }
+
                 bool background = false;
                 bool fit_pdf = false;
                 unsigned char nmodes = modes[i];
-                
+
                 for (int c = 0; c < C; c++) {
                     long long frame_idx = (long long) (c*num_pixels + i);
                     pData[c] = frame[frame_idx];

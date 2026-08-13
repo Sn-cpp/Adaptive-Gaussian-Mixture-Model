@@ -46,21 +46,23 @@ def mask_refiner(mask: np.ndarray):
     ground-truth 0/255 pixels inside the ROI:
 
                                     F1     IoU      P       R    holes/f  empty
-        raw MOG2                  0.8607  0.7554  0.9032  0.8220   77.2     0
+        raw MOG2                  0.8607  0.7554  0.9032  0.8220   75.8     0
         OPEN + CLOSE x2 + dilate  0.8748  0.7775  0.8121  0.9480    0.0     6
-        medianBlur + fill_holes   0.9344  0.8769  0.9873  0.8869    0.0     0
+        medianBlur + fill_holes   0.9338  0.8758  0.9873  0.8858    0.0     0
 
-    The morphology chain did remove the holes, but by inflating the silhouette
-    until it swallowed them along with the shadow: precision 0.90 -> 0.81. It
-    also produced 6 frames whose mask was *entirely empty* — for a blur product
-    that means the subject vanishes for a moment, which is far worse than the
-    F1 gap suggests. Filling holes directly keeps precision (0.90 -> 0.99) and
-    never empties the mask, at 2.8 ms/frame at 1080p against 4.1 ms.
+    The morphology chain scores a little above raw MOG2 on F1, but it gets
+    there by inflating the silhouette until it swallows the holes along with
+    the shadow: precision 0.90 -> 0.81. It also produced 6 frames whose mask
+    was *entirely empty* — for a blur product that means the subject vanishes
+    for a moment, which is far worse than the F1 gap suggests. Filling holes
+    directly keeps precision (0.90 -> 0.99) and never empties the mask, at
+    2.8 ms/frame at 1080p against 4.1 ms.
 
     Caveat worth keeping in view: `highway` is small high-contrast cars on grey
-    asphalt, and it is also what `input.mp4` in this repo contains. No person or
-    webcam footage has been scored anywhere in this project, so these numbers
-    describe traffic, not the target application.
+    asphalt, and it is also what `input.mp4` in this repo contains. These
+    numbers describe traffic, not the target application — see
+    `docs/conservative.md` for what happens on webcam footage, where the
+    limiting factor is not post-processing at all.
     """
     foreground = np.where(mask == 255, np.uint8(255), np.uint8(0))
     return fill_holes(cv2.medianBlur(foreground, 5))

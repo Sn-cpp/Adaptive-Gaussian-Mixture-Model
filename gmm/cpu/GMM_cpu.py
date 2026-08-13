@@ -36,16 +36,28 @@ def detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
 
 
 def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
-              alpha, prune, Tb, Tg, TB, var_init, var_min, var_max,
-              tau, shadow_val, detect_shadows):
+              alpha_in, prune_in, Tb, Tg, TB, var_init, var_min, var_max,
+              tau, shadow_val, detect_shadows, conservative):
     K = weights.shape[0]
     C = means.shape[1]
     H, W = frame.shape[1], frame.shape[2]
-    alpha1 = np.float32(1.0) - alpha
+    alpha1_in = np.float32(1.0) - alpha_in
     dData = [np.float32(0.0)] * C
 
     for y in range(H):
         for x in range(W):
+            # Conservative update: `mask` still holds the previous frame's
+            # decision at this point, and a pixel that was foreground then does
+            # not get to teach the background model anything now. alpha = 0
+            # leaves the means and variances alone and stops a new mode being
+            # created; prune = 0 is just as necessary, or the weights would
+            # keep decaying and the modes would be pruned away underneath us.
+            alpha, prune, alpha1 = alpha_in, prune_in, alpha1_in
+            if conservative and mask[y, x] == 255:
+                alpha = np.float32(0.0)
+                prune = np.float32(0.0)
+                alpha1 = np.float32(1.0)
+
             background = False
             fits_pdf = False
             nmodes = int(modes[y, x])

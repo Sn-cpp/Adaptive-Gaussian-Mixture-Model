@@ -32,6 +32,17 @@ if __name__ == "__main__":
     parser.add_argument("--colorspace", type=str, default="bgr", choices=("bgr", "ycrcb"),
                         help="Colorspace the model sees. ycrcb separates luma from chroma "
                              "(+6 to +13 F1 on CDnet highway); display stays BGR either way")
+    parser.add_argument("--conservative", action=argparse.BooleanOptionalAction, default=True,
+                        help="Freeze the background model wherever the previous frame was "
+                             "foreground (ViBe's rule), so a subject who stops moving is not "
+                             "absorbed. On by default here; --no-conservative gives plain "
+                             "MOG2, which is what the cv2 parity tests use")
+    parser.add_argument("--clean-plate", type=int, default=0, metavar="N",
+                        help="Train the background model on the first N frames before "
+                             "showing anything, and step out of shot while it does. MOG2 "
+                             "cannot tell a person who was there from frame 0 apart from a "
+                             "wall; N empty frames are what makes that distinction possible. "
+                             "Try 48 (2s at 24fps). 0 disables it")
 
     args = parser.parse_args()
 
@@ -83,7 +94,11 @@ if __name__ == "__main__":
 
     to_model = (lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb)) if use_ycrcb else (lambda f: f)
 
-    model = model_list[model_choice][1](to_model(first_frame), n_components=MOG2_N_COMPONENTS, parallel=True)
+    def to_planar(f):
+        return to_model(f).transpose(2, 0, 1).astype(np.float32)
+
+    model = model_list[model_choice][1](to_model(first_frame), n_components=MOG2_N_COMPONENTS,
+                                        conservative=args.conservative, parallel=True)
 
 
     # --------------------------------------------------------------------------------------
@@ -93,6 +108,22 @@ if __name__ == "__main__":
     if model_choice == 3 and cp_gpu_warmup is not None:
         cp_gpu_warmup()
 
+    # Clean plate. Nothing here is special-cased in the model: these are
+    # ordinary steps, they just happen to see a scene with nobody in it, so
+    # mode 0 ends up holding the real background instead of the background
+    # plus whoever was sitting in front of the camera when it started.
+    # Conservative update is what then keeps that model intact.
+    if args.clean_plate > 0:
+        print(f"Clean plate: step out of shot, learning the empty scene for "
+              f"{args.clean_plate} frames...")
+        for _ in range(args.clean_plate):
+            flag, frame = input_source.read()
+            if not flag:
+                print("  input ended during clean-plate capture")
+                break
+            model.step(to_planar(frame))
+        print("Clean plate done — come back into shot.")
+
     print("Ready")
     while running:
         flag, frame = input_source.read()
@@ -101,10 +132,7 @@ if __name__ == "__main__":
             running = False
             continue
 
-        # Convert the frame to planar mode (C, H, W)
-        planar_frame = to_model(frame).transpose(2, 0, 1).astype(np.float32)
-
-        mask, time_cost = model.step(planar_frame)
+        mask, time_cost = model.step(to_planar(frame))
         # Not int(): the sequential reference runs below 1 FPS, and the whole
         # point of the comparison is that number. int() rendered it as "0".
         model_fps = 1.0 / max(time_cost, 1e-9)

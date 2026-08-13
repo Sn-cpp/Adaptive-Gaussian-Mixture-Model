@@ -53,8 +53,8 @@ def _detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
 
 @cuda.jit
 def mog2_step_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
-                     alpha, prune, Tb, Tg, TB, var_init, var_min, var_max,
-                     tau, shadow_val, detect_shadows):
+                     alpha_in, prune_in, Tb, Tg, TB, var_init, var_min, var_max,
+                     tau, shadow_val, detect_shadows, conservative):
     x, y = cuda.grid(2)
     H = frame.shape[1]
     W = frame.shape[2]
@@ -63,8 +63,18 @@ def mog2_step_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
 
     K = weights.shape[0]
     C = means.shape[1]
-    alpha1 = float32(1.0) - alpha
     dData = cuda.local.array(MAX_C, float32)
+
+    # Conservative update — see `GMM_cpu.mog2_step`. `mask` still holds the
+    # previous frame's decision: this thread wrote its own pixel last frame and
+    # no other thread touches it, so there is nothing to synchronise.
+    alpha = alpha_in
+    prune = prune_in
+    alpha1 = float32(1.0) - alpha_in
+    if conservative and mask[y, x] == uint8(255):
+        alpha = float32(0.0)
+        prune = float32(0.0)
+        alpha1 = float32(1.0)
 
     background = False
     fits_pdf = False
@@ -196,7 +206,10 @@ class GMM_CUDA(MOG2Base):
         self.d_vars = cuda.to_device(self.vars)
         self.d_weights = cuda.to_device(self.weights)
         self.d_modes = cuda.to_device(self.modes)
-        self.d_mask = cuda.device_array((self.height, self.width), dtype=np.uint8)
+        # to_device, not device_array: the conservative update *reads* the mask
+        # back as the previous frame's decision, so frame 1 must not see
+        # whatever the allocator happened to hand out.
+        self.d_mask = cuda.to_device(self.mask)
         self.d_bg_prob = cuda.device_array((self.height, self.width), dtype=np.float32)
 
         self.block = (TILE_X, TILE_Y)

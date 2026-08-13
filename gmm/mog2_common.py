@@ -18,10 +18,10 @@ import cv2
 import numpy as np
 
 from settings import (
-    MOG2_BACKGROUND_RATIO, MOG2_CT, MOG2_DETECT_SHADOWS, MOG2_HISTORY,
-    MOG2_SHADOW_TAU, MOG2_SHADOW_VALUE, MOG2_VAR_INIT, MOG2_VAR_MAX,
-    MOG2_VAR_MIN, MOG2_VAR_THRESHOLD, MOG2_VAR_THRESHOLD_GEN,
-    BLUR_KSIZE, BLUR_SIGMA,
+    MOG2_BACKGROUND_RATIO, MOG2_CONSERVATIVE_UPDATE, MOG2_CT,
+    MOG2_DETECT_SHADOWS, MOG2_HISTORY, MOG2_SHADOW_TAU, MOG2_SHADOW_VALUE,
+    MOG2_VAR_INIT, MOG2_VAR_MAX, MOG2_VAR_MIN, MOG2_VAR_THRESHOLD,
+    MOG2_VAR_THRESHOLD_GEN, BLUR_KSIZE, BLUR_SIGMA,
 )
 
 
@@ -43,7 +43,8 @@ def kernel_args(alpha, var_threshold=MOG2_VAR_THRESHOLD,
                 var_init=MOG2_VAR_INIT, var_min=MOG2_VAR_MIN,
                 var_max=MOG2_VAR_MAX, ct=MOG2_CT, tau=MOG2_SHADOW_TAU,
                 shadow_value=MOG2_SHADOW_VALUE,
-                detect_shadows=MOG2_DETECT_SHADOWS):
+                detect_shadows=MOG2_DETECT_SHADOWS,
+                conservative=MOG2_CONSERVATIVE_UPDATE):
     """Scalar arguments every backend kernel takes, in one fixed order."""
     return (
         np.float32(alpha),
@@ -57,6 +58,7 @@ def kernel_args(alpha, var_threshold=MOG2_VAR_THRESHOLD,
         np.float32(tau),
         np.uint8(shadow_value),
         bool(detect_shadows),
+        bool(conservative),
     )
 
 
@@ -127,7 +129,24 @@ class MOG2Base:
                  var_init=MOG2_VAR_INIT, var_min=MOG2_VAR_MIN,
                  var_max=MOG2_VAR_MAX, ct=MOG2_CT, tau=MOG2_SHADOW_TAU,
                  shadow_value=MOG2_SHADOW_VALUE,
-                 detect_shadows=MOG2_DETECT_SHADOWS, *arg, **kwargs):
+                 detect_shadows=MOG2_DETECT_SHADOWS,
+                 conservative=MOG2_CONSERVATIVE_UPDATE, *arg, **kwargs):
+        """`conservative` freezes the model wherever the *previous* frame was
+        classified foreground: that pixel runs with alpha = 0 and prune = 0, so
+        its Gaussians keep their weights, means and variances untouched and no
+        new mode is created. Classification still runs, against the frozen
+        model, which is what releases the pixel again — once the subject moves
+        away the pixel matches the background it was frozen at, is classified
+        background, and resumes updating on the next frame. That makes the
+        hysteresis free: no timer, no second model, no extra state.
+
+        The one case it cannot recover from is a background that genuinely
+        changed while protected — a chair pushed aside, a door left open. Such
+        a pixel never matches the frozen model again and stays foreground for
+        good. ViBe answers that with random spatial propagation, which is not
+        implemented here — see the measurements in `docs/conservative.md` for
+        how often it actually bites on the test clip.
+        """
         self.height, self.width = first_frame.shape[:2]
         self.n_comps = int(n_components)
         self.n_channels = 3 if color else 1
@@ -139,6 +158,7 @@ class MOG2Base:
             background_ratio=background_ratio, var_init=var_init,
             var_min=var_min, var_max=var_max, ct=ct, tau=tau,
             shadow_value=shadow_value, detect_shadows=detect_shadows,
+            conservative=conservative,
         )
 
         K, C, H, W = self.n_comps, self.n_channels, self.height, self.width

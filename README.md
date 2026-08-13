@@ -58,10 +58,22 @@ python tests/test_env.py
 python main.py
 ```
 
+For a webcam, give the model two seconds of empty room first:
+
+```bash
+python main.py --clean-plate 48
+```
+
 Select the backend via `--model` (0=CPU, 1=Numba, 2=CUDA, 3=CuPy RawKernel);
 see `python main.py --help`. `--colorspace ycrcb` runs the model in YCrCb while
 the display stays BGR — on CDnet `highway` this lifts mask F1 from 0.73 to 0.86
 (shadow detection on) by separating luma from chroma.
+
+`--clean-plate N` trains on the first N frames before showing anything: step out
+of shot while it does. `--conservative` (on by default in `main.py`, off
+everywhere else) stops a subject who holds still from being absorbed back into
+the background. The two go together and neither works alone — see
+[docs/conservative.md](docs/conservative.md).
 
 Model defaults match OpenCV and live in `settings.py`.
 
@@ -166,10 +178,14 @@ a machine with a GPU, or under `NUMBA_ENABLE_CUDASIM=1`, before believing it.
 │   ├── iou.py, metric_monitor.py     # Scoring and the live plot benchmark.py draws
 │   ├── gpu_warmup.py                 # CuPy warm-up
 │   └── timer.py                      # CPU/GPU timing utilities
+├── docs/
+│   ├── conservative.md               # The stationary subject: diagnosis and fix
+│   └── experiment_cleanplate.py      # Reproduces the table in it
 ├── tests/
 │   ├── conftest.py                   # pytest fixtures + cupy mock
 │   ├── test_mog2_correctness.py      # OpenCV parity, model agreement, stability
 │   ├── test_smoke_models.py          # Every model through main.py's call shape
+│   ├── test_conservative_update.py   # Stationary subject held, ghost released
 │   ├── test_post_processing.py       # Mask refinement + blur composite
 │   ├── test_push_relabel.py          # Max-flow vs PyMaxflow, morphology vs OpenCV
 │   └── test_env.py                   # Environment smoke test
@@ -183,40 +199,47 @@ a machine with a GPU, or under `NUMBA_ENABLE_CUDASIM=1`, before believing it.
 └── requirements.txt
 ```
 
-## What this does not do: a stationary subject
+## The stationary subject
 
-MOG2 detects *motion*, not *people*. Scored on a real 1080p webcam clip
-(`LTSSUD-Test.mp4`, 310 frames, one person seated and waving), the model is
-initialised on frame 0 — which already contains the person — so the subject is
-part of the background from the first second, and only the moving hand is ever
-segmented:
+MOG2 detects *motion*, not *people*. A subject who holds still is folded into
+the background within a second or two and stops being detected — the single
+biggest quality problem on webcam footage, and one that no post-processing can
+undo, because it refines a mask that no longer contains the person.
 
-| frames | mean mask coverage |
-|---|---|
-| 0–30 | 3.7% |
-| 80–150 | 9.8% |
-| 150–200 | 24.4% |
-| 200–309 | 11.7% |
+Two things fix it, and **both are needed**:
 
-129 of 309 frames come back under 5% coverage against a subject occupying
-25–30% of the frame, and the mask averages 96 connected components where a
-person is one. The learning rate is the only lever, and it trades one failure
-for another:
+- **A clean plate.** N frames of the empty room before the subject appears, so
+  the model has a real background to compare against. `--clean-plate 48`.
+- **Conservative update** (ViBe's rule): a pixel only feeds the background model
+  if it was classified *background*. `alpha = 0` and `prune = 0` wherever the
+  previous frame said foreground, so those Gaussians are frozen. On by default
+  in `main.py`.
 
-| `update_alpha` | mean coverage | frames < 5% | frames > 60% |
-|---|---|---|---|
-| ramp (default) | 10.6% | 137 | 3 |
-| 0.01 | 5.9% | 171 | 1 |
-| 0.002 | 14.5% | 60 | 3 |
-| 0.0005 | 25.2% | 21 | 27 |
+Measured on a composited sequence with exact ground truth — real `highway`
+frames as the background, a real person crop pasted through an ellipse, entering
+at frame 60 and then never moving again. IoU on the subject, 200 scored frames
+(`python docs/experiment_cleanplate.py`):
 
-`alpha=0.0005` gets the coverage right and produces a recognisably
-person-shaped mask, at the cost of 27 frames where a camera auto-exposure
-change marks most of the frame. Neither post-processing nor the graph cut can
-repair this, because both only refine a seed and the seed does not contain the
-subject. A clip that starts with an empty room gives MOG2 a real background to
-learn and the problem disappears — which is how background subtraction is meant
-to be used.
+| configuration | IoU | first 20 frames | last 100 frames | frames lost |
+|---|---:|---:|---:|---:|
+| present from frame 0, plain | 0.000 | 0.000 | 0.000 | 200/200 |
+| present from frame 0, conservative | 0.000 | 0.000 | 0.000 | 200/200 |
+| clean plate, plain MOG2 | 0.070 | 0.696 | 0.000 | 186/200 |
+| **clean plate + conservative** | **0.972** | **0.991** | **0.961** | **0/200** |
+
+Plain MOG2 detects the subject cleanly on entry and has lost it one second
+later. Conservative update without a clean plate cannot help at all: it protects
+what was *detected*, and a subject already present in frame 0 is inside mode 0
+before anything runs.
+
+That last row is also the honest limit of `LTSSUD-Test.mp4`, the 1080p clip in
+this repo: the person is seated from frame 0 and never leaves, so no clean plate
+exists and the mask degenerates to an outline of whatever moved. Conservative
+update roughly doubles coverage there (8.9% → 18.1%) and cuts the frames where
+the subject has vanished from 137 to 35 of 310, but the extra pixels are edges,
+not a silhouette. `docs/conservative.md` has the pictures, the cost on
+`highway` (F1 0.9338 → 0.9283, precision traded for recall) and why the large
+morphological CLOSE that *does* seal the outline is the wrong fix.
 
 ## Optional: GrabCut refinement (`graphcut/`)
 
@@ -245,7 +268,8 @@ With MOG2, a person who stops moving stays foreground for
 below the background ratio `TB = 0.9`. At the default `alpha = 1/500` that is
 ~53 frames (~1.8 s at 30 FPS). It is **not** `TB × history`. Lower the learning
 rate to keep still subjects sharp for longer; the test suite checks this against
-OpenCV at three learning rates.
+OpenCV at three learning rates. `--conservative` makes the persistence
+unbounded instead of trading it against adaptation speed — see above.
 
 ## Measured results
 
