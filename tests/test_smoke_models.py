@@ -124,3 +124,53 @@ def test_step_signature_is_shared():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, '-v', '-s']))
+
+
+@pytest.mark.parametrize('model_cls', CPU_MODELS, ids=model_id)
+def test_bg_prob_carries_real_information(model_cls):
+    """bg_prob is the seed the graph cut is built from, so an all-zero map is
+    not a degraded result — it marks every pixel probable-foreground and the
+    segmentation becomes noise. Nothing tested it: setting it to zero passed
+    the whole suite.
+
+    It is the summed weight of the modes that matched inside the background
+    set, so it is high where the mask says background and exactly zero where
+    the mask says foreground.
+    """
+    seq = frames(n=8)
+    model = model_cls(seq[0], n_components=K, parallel=True)
+    for f in seq:
+        planar = f.transpose(2, 0, 1).astype(np.float32)
+        model.step(planar, UPDATE_ALPHA)
+
+    bg_prob = np.asarray(model.bg_prob)
+    mask = np.asarray(model.mask)
+
+    assert bg_prob.shape == (H, W) and bg_prob.dtype == np.float32
+    assert bg_prob.min() >= 0.0 and bg_prob.max() <= 1.0, \
+        f"outside [0,1]: [{bg_prob.min()}, {bg_prob.max()}]"
+    assert bg_prob.any(), "bg_prob is identically zero — nothing is computing it"
+
+    on_fg = bg_prob[mask == 255]
+    on_bg = bg_prob[mask == 0]
+    if on_fg.size:
+        assert (on_fg == 0).all(), \
+            "a foreground pixel matched no background mode, so its confidence must be 0"
+    if on_bg.size:
+        assert on_bg.mean() > 0.0, "background pixels must carry some confidence"
+
+
+def test_bg_prob_agrees_across_backends():
+    """The spec and the JIT must produce the same confidence, not just the same
+    mask — the graph cut reads the confidence."""
+    seq = frames(n=8)
+    out = {}
+    for cls in CPU_MODELS:
+        m = cls(seq[0], n_components=K, parallel=True)
+        for f in seq:
+            m.step(f.transpose(2, 0, 1).astype(np.float32), UPDATE_ALPHA)
+        out[cls.__name__] = np.asarray(m.bg_prob).copy()
+    names = list(out)
+    for other in names[1:]:
+        assert np.allclose(out[names[0]], out[other], atol=1e-6), \
+            f"{names[0]} and {other} disagree on bg_prob"

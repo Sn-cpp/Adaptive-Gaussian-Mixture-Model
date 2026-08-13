@@ -224,3 +224,24 @@ class TestPostProcessingPackage:
         assert residual[1080] < residual[240] * 4, (
             f"1080p keeps {residual[1080]:.3%} sharp against {residual[240]:.3%} "
             "at 240p — the kernel is not scaling")
+
+
+class TestPipelineGuards:
+
+    def test_pipeline_rejects_a_differently_sized_frame(self):
+        """Every buffer is allocated once against the first frame. A frame of
+        another size used to pass straight through and return a mask of the
+        original shape, silently — which is what a webcam renegotiating its
+        resolution mid-stream produces."""
+        import pytest
+        from gmm import GMM_CPU_NUMBA
+        from pipeline import make_pipeline
+        rng = np.random.default_rng(0)
+        first = rng.integers(0, 256, (32, 40, 3), dtype=np.uint8)
+        p = make_pipeline(GMM_CPU_NUMBA, first, n_components=5)
+
+        out, mask, _ = p.process(rng.integers(0, 256, (32, 40, 3), dtype=np.uint8))
+        assert mask.shape == (32, 40)
+
+        with pytest.raises(ValueError, match="64x48|48x64"):
+            p.process(rng.integers(0, 256, (48, 64, 3), dtype=np.uint8))

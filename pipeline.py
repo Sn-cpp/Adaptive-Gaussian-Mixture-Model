@@ -88,7 +88,22 @@ class Pipeline:
         self.tmp = np.zeros((H, W, 3), np.float32)
         self.out = np.zeros((H, W, 3), np.uint8)
 
+    def _check_size(self, frame_bgr):
+        """Every buffer here is allocated once against the first frame.
+
+        A frame of a different size used to sail straight through: the model
+        indexed its own state, the blur wrote into the original buffers, and
+        the caller got back a mask of the wrong shape with no error at all.
+        A webcam that renegotiates resolution mid-stream produces exactly that.
+        """
+        h, w = frame_bgr.shape[:2]
+        if (h, w) != (self.height, self.width):
+            raise ValueError(
+                f"{type(self).__name__} was built for {self.width}x{self.height} "
+                f"but got {w}x{h}. Build a new pipeline, or resize the frame.")
+
     def process(self, frame_bgr, update_alpha=-1.0):
+        self._check_size(frame_bgr)
         t = {}
 
         t0 = time.perf_counter()
@@ -199,7 +214,22 @@ class CUDAPipeline:
         slot.event.record(stream=st)
         self.prev_event = slot.event
 
+    def _check_size(self, frame_bgr):
+        """Every buffer here is allocated once against the first frame.
+
+        A frame of a different size used to sail straight through: the model
+        indexed its own state, the blur wrote into the original buffers, and
+        the caller got back a mask of the wrong shape with no error at all.
+        A webcam that renegotiates resolution mid-stream produces exactly that.
+        """
+        h, w = frame_bgr.shape[:2]
+        if (h, w) != (self.height, self.width):
+            raise ValueError(
+                f"{type(self).__name__} was built for {self.width}x{self.height} "
+                f"but got {w}x{h}. Build a new pipeline, or resize the frame.")
+
     def process(self, frame_bgr, update_alpha=-1.0):
+        self._check_size(frame_bgr)
         slot = self.slots[0]
         t0 = time.perf_counter()
         self._enqueue(slot, frame_bgr, update_alpha)
