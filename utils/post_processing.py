@@ -56,10 +56,31 @@ def mask_refiner(mask: np.ndarray):
     foreground = np.where(mask == 255, np.uint8(255), np.uint8(0))
     return fill_holes(cv2.medianBlur(foreground, 5))
 
-def background_subtractor(frame: np.ndarray, mask: np.ndarray):
+def blur_ksize_for(frame: np.ndarray, reference_height: int = 240,
+                   reference_ksize: int = 15):
+    """Scale the blur kernel with the frame, so the effect looks the same.
 
-    # Blur the entire frame, serving as background
-    blurred_frame = cv2.GaussianBlur(frame, (15, 15), 0)
+    A fixed 15x15 is a strong blur on a 240p face and barely visible on a 1080p
+    one, because 15 pixels covers a much smaller share of the subject. Measured
+    on LTSSUD-Test.mp4, residual sharpness (variance of Laplacian, as a fraction
+    of the unblurred frame) after a fixed 15x15:
+
+        240p 0.7%    480p 1.5%    720p 4.9%    1080p 8.1%
+
+    Scaling by height keeps that constant. `settings.BLUR_KSIZE` stays 15 and
+    still drives blur_numba / blur_cuda, whose benchmark figures were all taken
+    at a fixed kernel; this only affects the composite the demo displays.
+    """
+    k = int(round(reference_ksize * frame.shape[0] / reference_height))
+    return max(3, k | 1)
+
+
+def background_subtractor(frame: np.ndarray, mask: np.ndarray, ksize: int = None):
+    """Keep the masked subject sharp, blur everything else."""
+    if ksize is None:
+        ksize = blur_ksize_for(frame)
+
+    blurred_frame = cv2.GaussianBlur(frame, (ksize, ksize), 0)
 
     # copyTo wants a binary mask, not an image. Passing a 3-channel BGR image
     # makes OpenCV mask each channel separately, so any channel that happens to

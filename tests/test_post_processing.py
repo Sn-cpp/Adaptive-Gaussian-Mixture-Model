@@ -162,3 +162,32 @@ class TestPostProcessingPackage:
 
         assert out[H // 2, W // 2 + 4] == 0, "shadow was kept as foreground"
         assert out[H // 2, W // 4] == 255, "subject was dropped"
+
+    def test_blur_kernel_scales_with_resolution(self):
+        """A fixed 15x15 is strong at 240p and nearly invisible at 1080p.
+
+        Measured on LTSSUD-Test.mp4, residual sharpness after a fixed 15x15:
+        0.7% at 240p against 8.1% at 1080p. Scaling by frame height keeps the
+        effect constant.
+        """
+        from utils.post_processing import blur_ksize_for
+        assert blur_ksize_for(np.zeros((240, 320, 3), np.uint8)) == 15
+        assert blur_ksize_for(np.zeros((1080, 1920, 3), np.uint8)) == 68 | 1
+        for h in (120, 240, 480, 720, 1080):
+            k = blur_ksize_for(np.zeros((h, h * 2, 3), np.uint8))
+            assert k % 2 == 1 and k >= 3, f"{h}p gave an unusable kernel {k}"
+
+    def test_background_subtractor_blurs_harder_at_higher_resolution(self):
+        from utils.post_processing import background_subtractor
+        rng = np.random.default_rng(0)
+        residual = {}
+        for h, w in ((240, 320), (1080, 1440)):
+            frame = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+            mask = np.zeros((h, w), np.uint8)          # blur the whole frame
+            out = background_subtractor(frame, mask)
+            sharp = lambda im: cv2.Laplacian(
+                cv2.cvtColor(im, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
+            residual[h] = sharp(out) / sharp(frame)
+        assert residual[1080] < residual[240] * 4, (
+            f"1080p keeps {residual[1080]:.3%} sharp against {residual[240]:.3%} "
+            "at 240p — the kernel is not scaling")
