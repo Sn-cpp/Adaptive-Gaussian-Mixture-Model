@@ -6,6 +6,13 @@ pandas
 tqdm
 pytest
 
-# Only needed for the GMM_CUPY_* models — pick the wheel matching your CUDA
-# runtime, e.g. cupy-cuda12x on Colab.
+# graphcut/: the reference max-flow the Push-Relabel tests are scored against.
+PyMaxflow
+
+# benchmark.py only — reads keypresses to switch panels while it runs.
+# On Linux it needs root; skip it if you are not running benchmark.py.
+# keyboard
+
+# Only needed for GMM_CUPY — pick the wheel matching your CUDA runtime,
+# e.g. cupy-cuda12x on Colab.
 # cupy-cuda12x

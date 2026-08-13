@@ -57,6 +57,7 @@ extern "C" __global__ void step_gmm(
     float* vars_,
     unsigned char* modes,
     unsigned char* mask,
+    float* bg_prob,
     const float FLT_EPS,
     const int H, const int W, const int C, const int K,
     const float alpha,
@@ -99,6 +100,7 @@ extern "C" __global__ void step_gmm(
 
 
                 float total_weight = 0.0;
+                float bg_weight_sum = 0.0f;
                 for (int mode = 0; mode < nmodes; mode++) {
                     long long w_v_idx = (long long) (mode*num_pixels + i);
                     float weight = alpha1 * weights[w_v_idx] + prune;
@@ -117,6 +119,7 @@ extern "C" __global__ void step_gmm(
 
                         if ((total_weight < TB) && (dist2 < Tb * var)) {
                             background = true;
+                            bg_weight_sum += weights[w_v_idx];
                         }
 
                         if (dist2 < Tg * var) {
@@ -235,6 +238,7 @@ extern "C" __global__ void step_gmm(
                 }
                 
                 modes[i] = nmodes;
+                bg_prob[i] = bg_weight_sum;
 
                 if (background) {
                     mask[i] = 0;

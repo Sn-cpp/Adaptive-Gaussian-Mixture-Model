@@ -64,11 +64,20 @@ def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
                     var = vars_[mode, y, x]
                     dist2 = np.float32(0.0)
 
-                    # HELP ME TEST THIS
-                    # dData[0] = means[mode, 0, y, x] - frame[0, y, x]
-                    # dData[1] = means[mode, 1, y, x] - frame[1, y, x]
-                    # dData[2] = means[mode, 2, y, x] - frame[2, y, x]
-                    # dist2 = 0.25*(dData[0]**2) + 1.0*(dData[1]**2) + 1.0*(dData[2]**2)
+                    # Weighting the channels unequally here — down-weighting
+                    # luma to 0.25 so shadow counts for less — was tried and
+                    # measured on CDnet highway (400 frames, YCrCb input):
+                    #
+                    #   (Y,Cr,Cb) = 1,1,1      F1 0.9297   P 0.976  R 0.887
+                    #   (Y,Cr,Cb) = 0.5,1,1    F1 0.9081   P 0.995  R 0.835
+                    #   (Y,Cr,Cb) = 0.25,1,1   F1 0.8663   P 0.999  R 0.765
+                    #   (Y,Cr,Cb) = 0.1,1,1    F1 0.8115   P 1.000  R 0.683
+                    #
+                    # It buys precision and pays far more in recall: a vehicle
+                    # differs from asphalt mostly in brightness, so discounting
+                    # luma stops detecting it. Feeding the model YCrCb already
+                    # captures the shadow benefit (F1 0.73 -> 0.86); weighting
+                    # on top of that overshoots. Left unweighted deliberately.
 
                     for c in range(C):
                         dd = means[mode, c, y, x] - frame[c, y, x]

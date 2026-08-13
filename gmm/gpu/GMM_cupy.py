@@ -18,6 +18,7 @@ TILE_Y = 8
 MAX_C = 3
 
 class GMM_CUPY(MOG2Base):
+    FILLS_BG_PROB = True
     def __init__(self, first_frame: np.ndarray, n_components: int, *arg, **kwargs):
         super().__init__(first_frame, n_components, *arg, **kwargs)
 
@@ -26,6 +27,7 @@ class GMM_CUPY(MOG2Base):
         self.d_weights = cp.asarray(self.weights)
         self.d_modes = cp.asarray(self.modes)
         self.d_mask = cp.asarray(self.mask)
+        self.d_bg_prob = cp.asarray(self.bg_prob)
 
         self.height = np.int32(self.height)
         self.width = np.int32(self.width)
@@ -46,6 +48,7 @@ class GMM_CUPY(MOG2Base):
             self.d_vars,
             self.d_modes,
             self.d_mask,
+            self.d_bg_prob,
             FLT_EPSILON,
             self.height, self.width, self.n_channels, self.n_comps,
             *args
@@ -57,6 +60,7 @@ class GMM_CUPY(MOG2Base):
         self.step_device(d_frame, args)
         cp.cuda.Device().synchronize()
         self.mask = self.d_mask.get()
+        self.bg_prob = self.d_bg_prob.get()
 
     def sync_state(self):
         self.weights = self.d_weights.get()
