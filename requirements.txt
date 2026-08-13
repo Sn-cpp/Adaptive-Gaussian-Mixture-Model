@@ -1,0 +1,13 @@
+numpy
+opencv-python
+
+# >= 0.61: numba 0.60 — the Colab default — miscompiles
+# grabcut/cpu/numba/push_relabel.py and segfaults on any grid from 60x80 up.
+# It is not a threading problem (it crashes with NUMBA_NUM_THREADS=1) and
+# NUMBA_DISABLE_JIT=1 computes the correct cut, so the algorithm is fine.
+# Measured on a Colab T4: 0.60.0 gives SIGSEGV at 60x80, 120x160 and 240x320;
+# 0.67.0 runs all three. Pin this before demoing on Colab.
+numba>=0.61
+
+# The reference max-flow the push-relabel implementations are scored against.
+PyMaxflow
