@@ -174,3 +174,41 @@ def test_bg_prob_agrees_across_backends():
     for other in names[1:]:
         assert np.allclose(out[names[0]], out[other], atol=1e-6), \
             f"{names[0]} and {other} disagree on bg_prob"
+
+
+def test_bg_prob_agrees_across_every_backend_including_gpu():
+    """The CPU-only version of this test let a real divergence through.
+
+    GMM_CUPY's .cu kernel had Zivkovic's complexity-reduction pruning commented
+    out, so its model drifted from the other three. Its bg_prob differed from
+    the sequential spec by 2.06e-02 on a T4, against 2e-07 for GMM_CUDA — the
+    difference between a genuinely different model and float32 rounding. The
+    binary masks still agreed, because MOG2's own decision is `bg_prob > 0` and
+    a pruned mode carries almost no weight, so every mask-comparing test stayed
+    green. `mask_refiner` now *thresholds* bg_prob at 0.5, where a 2% drift
+    flips pixels.
+
+    Sixty frames, not eight: pruning only fires once a mode's weight has had
+    time to decay past -prune.
+    """
+    import pytest
+    if cupy_is_mocked():
+        pytest.skip("cupy is mocked — no GPU on this machine")
+    available = [c for c in CPU_MODELS + GPU_MODELS if c is not None]
+    if len(available) <= len(CPU_MODELS):
+        pytest.skip("no GPU backend available")
+
+    seq = frames(n=60)
+    out = {}
+    for cls in available:
+        m = cls(seq[0], n_components=K, parallel=True)
+        for f in seq:
+            m.step(f.transpose(2, 0, 1).astype(np.float32), UPDATE_ALPHA)
+        out[cls.__name__] = np.asarray(m.bg_prob).copy()
+
+    ref_name = GMM_CPU.__name__
+    for name, bp in out.items():
+        drift = float(np.abs(bp - out[ref_name]).max())
+        assert drift < 1e-5, (
+            f"{name} bg_prob drifts {drift:.2e} from the sequential spec — "
+            "that is a different model, not float32 rounding")

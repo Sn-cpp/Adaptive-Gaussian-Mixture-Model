@@ -182,9 +182,18 @@ extern "C" __global__ void step_gmm(
 
                     }
                 
+                    // Zivkovic's complexity reduction: a mode whose weight has
+                    // decayed past the prune threshold is dropped. This was
+                    // commented out, which is why GMM_CUPY's bg_prob drifted
+                    // 2.06e-02 from the sequential spec while GMM_CUDA stayed
+                    // at 2e-07 — float32 rounding against a genuinely different
+                    // model. The binary mask happened to agree anyway, because
+                    // MOG2's own decision is `bg_prob > 0` and a pruned mode
+                    // carries almost no weight; once mask_refiner started
+                    // *thresholding* bg_prob at 0.5, that stopped being true.
                     if (weight < -prune) {
-                        // weight = 0.0;
-                        // nmodes -= 1;
+                        weight = 0.0;
+                        nmodes -= 1;
                     }
 
                     weights[(long long) ((mode-swap_count)*num_pixels + i)] = weight;
