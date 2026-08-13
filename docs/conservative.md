@@ -61,12 +61,30 @@ through `mask_refiner`:
 | conservative off | 0.9338 | 0.8758 | 0.9873 | 0.8858 |
 | conservative on  | 0.9283 | 0.8661 | 0.8816 | 0.9801 |
 
-It costs 0.6 F1 there: a car's trailing edge stays protected slightly longer
-than the ground truth says it should, so recall rises to 0.98 and precision
-falls. That is the correct trade for a webcam and the wrong one for traffic,
-which is why the option is **off by default** — `settings.MOG2_CONSERVATIVE_UPDATE`
-— and turned on only by `main.py`. With it off the models remain bit-exact
-against `cv2.BackgroundSubtractorMOG2`, which is what `tests/` asserts.
+It costs **nothing measurable in time**. Tesla T4, `input.mp4` upscaled to
+1080p, `GMM_CUDA`, five interleaved A/B repeats of 30 timed frames each:
+
+    plain          9.74  9.50  9.32  9.21 10.08   median 9.50 ms
+    conservative   9.52  9.29  9.22 10.10  9.84   median 9.52 ms
+
++0.2%, well inside the spread of a shared T4. It is one comparison and three
+register writes per thread, and it launches no extra kernel and allocates
+nothing — the previous frame's decision is already in `mask`, and the thread
+that reads it is the thread that wrote it. Interleave the A/B repeats if you
+re-measure this: a single cold pass reported +37% purely from host contention.
+
+What it does cost is 0.6 F1 on highway: a car's trailing edge stays protected
+longer than the ground truth says it should, so recall rises to 0.98 and
+precision falls. That is the correct trade for a webcam and the wrong one for
+traffic, which is why the option is **off by default** —
+`settings.MOG2_CONSERVATIVE_UPDATE` — and turned on only by `main.py`. With it
+off the models remain bit-exact against `cv2.BackgroundSubtractorMOG2`, which
+is what `tests/` asserts.
+
+All four backends were checked against each other on a real T4, with the option
+both off and on: the sequential Python spec, the Numba CPU kernel, the Numba
+CUDA kernel and the CuPy `RawKernel` produce **identical masks, zero pixels
+differing**, and `pytest tests/` is 66 passed with nothing skipped.
 
 ## What it does *not* fix
 

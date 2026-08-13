@@ -1,5 +1,12 @@
 numpy
-numba
+
+# Keep numba below 0.62 on Colab. From 0.62 the CUDA target lives in a separate
+# `numba-cuda` package, and Colab's preinstalled one does not match a newer
+# numba: `from numba import cuda` then raises AttributeError, `cuda.is_available()`
+# never runs, and gmm/__init__.py quietly sets GMM_CUDA = None. The CUDA backend
+# disappears with no error message. Measured on Colab with numba 0.67.
+numba<0.62
+
 opencv-python
 matplotlib
 pandas
