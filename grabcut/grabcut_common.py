@@ -40,7 +40,7 @@ class GrabCut_Base:
         self.gamma = GAMMA
         self.blur_ks = BLUR_KSIZE
 
-    def apply(self, frame: np.ndarray, bg_prob: np.ndarray, to_host=True, profiling=False):
+    def apply(self, frame, bg_prob, to_host=True, profiling=False):
         t0 = perf_counter()
         mask, composite_frame = self._step_kernel(frame, bg_prob, to_host, profiling)
         return mask, composite_frame, perf_counter() - t0

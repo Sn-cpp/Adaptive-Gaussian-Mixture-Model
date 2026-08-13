@@ -10,6 +10,8 @@ from .morphology_cuda_v0 import (
 )
 from settings import PUSH_RELABEL_MAX_ITER, PUSH_RELABEL_RELABEL_FREQ, LAM_FACTOR
 
+from time import perf_counter
+from utils import line_measurer_cuda, line_measurer
 
 class GrabCut_CUDA_v0(GrabCut_Base):
     """GrabCut with CUDA GMMs, CUDA helper kernels, and CPU push-relabel.
@@ -34,7 +36,6 @@ class GrabCut_CUDA_v0(GrabCut_Base):
         self._grid  = (N + self._BLOCK - 1) // self._BLOCK
 
         # ── device scratch arrays ──────────────────────────────────────────────
-        self.d_img_f32   = cuda.to_device(np.zeros((H, W, 3), dtype=np.float32))
         self.d_bg_prob   = cuda.to_device(np.zeros((H, W),    dtype=np.float32))
         self.d_gc_mask   = cuda.to_device(np.zeros((H, W),    dtype=np.uint8))
         self.d_nlp_bg    = cuda.to_device(np.zeros((H, W),    dtype=np.float32))
@@ -57,30 +58,21 @@ class GrabCut_CUDA_v0(GrabCut_Base):
         # Pre-allocated zero arrays for device resets (avoid per-frame alloc)
         self._h_beta_zero = np.zeros(1, dtype=np.float64)
 
-    # ── public entry point ────────────────────────────────────────────────────
+    
+    def _step_kernel(self, frame, bg_prob, to_host, profiling):
+        d_frame = frame if hasattr(frame, 'copy_to_host') else cuda.to_device(frame)
+        d_bg_prob = bg_prob if hasattr(bg_prob, 'copy_to_host') else cuda.to_device(np.ascontiguousarray(bg_prob, dtype=np.float32)) 
 
-    def apply(self, frame, bg_prob, to_host=True, profiling=False):
-        """Accept host or device arrays; upload if necessary, then run pipeline."""
-        from time import perf_counter
-        t0 = perf_counter()
+        self._step_device(d_frame, d_bg_prob, profiling)
+        cuda.synchronize()
 
-        if hasattr(frame, 'copy_to_host'):
-            d_frame = frame
+        if to_host:
+            self._composite = self.d_composite.copy_to_host()
+            return self._final_mask, self._composite
         else:
-            self.d_img_f32.copy_to_device(frame)
-            d_frame = self.d_img_f32
+            return self.d_final_mask, self.d_composite
 
-        if hasattr(bg_prob, 'copy_to_host'):
-            d_bg_prob = bg_prob
-        else:
-            self.d_bg_prob.copy_to_device(
-                np.ascontiguousarray(bg_prob, dtype=np.float32))
-            d_bg_prob = self.d_bg_prob
-
-        mask, composite = self._step_kernel(d_frame, d_bg_prob)
-        return mask, composite, perf_counter() - t0
-
-    def _step_kernel(self, d_frame, d_bg_prob):
+    def _step_device(self, d_frame, d_bg_prob, profiling):
         """Full GrabCut pipeline.  Both inputs must be device arrays.
 
         d_frame   : (H, W, 3) float32  device
@@ -89,33 +81,39 @@ class GrabCut_CUDA_v0(GrabCut_Base):
         """
         H, W = np.int32(self.H), np.int32(self.W)
 
+        profiling_d = dict()
+        profiler_func = line_measurer_cuda if profiling else (lambda func, *args, **kwargs: func(*args, **kwargs))
+
         # ── 1. GC label map ───────────────────────────────────────────────────
-        _make_gc_mask_cuda[self._grid, self._BLOCK](
+
+        _, profiling_d['make gc'] = line_measurer_cuda(_make_gc_mask_cuda[self._grid, self._BLOCK],
             d_bg_prob, self.d_gc_mask, H, W)
 
         # ── 2. GMM fit (E + M-step, GPU) ──────────────────────────────────────
-        self._bg_gmm.fit(d_frame, self.d_gc_mask, is_fg=False)
-        self._fg_gmm.fit(d_frame, self.d_gc_mask, is_fg=True)
-
+        profiling_d['bg fit'] = self._bg_gmm.fit(d_frame, self.d_gc_mask, is_fg=False)
+        profiling_d['fg fit'] = self._fg_gmm.fit(d_frame, self.d_gc_mask, is_fg=True)
+        
         # ── 3. Neg-log-prob maps (GPU) ────────────────────────────────────────
-        self._bg_gmm.neg_log_prob(d_frame, self.d_nlp_bg)
-        self._fg_gmm.neg_log_prob(d_frame, self.d_nlp_fg)
+        profiling_d['nlp bg'] = self._bg_gmm.neg_log_prob(d_frame, self.d_nlp_bg)
+        profiling_d['nlp fg'] = self._fg_gmm.neg_log_prob(d_frame, self.d_nlp_fg)
 
         # ── 4. Beta scalar (GPU reduction → 1 scalar download) ────────────────
         self.d_beta_acc.copy_to_device(self._h_beta_zero)
-        _calc_beta_acc_cuda[self._grid, self._BLOCK](
+
+        _, profiling_d['beta accumulate'] = line_measurer_cuda(_calc_beta_acc_cuda[self._grid, self._BLOCK],
             d_frame, self.d_beta_acc, H, W)
-        cuda.synchronize()
+        # cuda.synchronize()
+
         beta_sum = float(self.d_beta_acc.copy_to_host()[0])
         denom    = 4 * int(W) * int(H) - 3 * int(W) - 3 * int(H) + 2
         beta     = np.float32(0.0 if beta_sum <= 1e-12
                               else 1.0 / (2.0 * beta_sum / denom))
 
         # ── 5. N-weights (GPU) ────────────────────────────────────────────────
-        _calc_nweights_cuda[self._grid, self._BLOCK](
+        _, profiling_d['calc nweights'] = line_measurer_cuda(_calc_nweights_cuda[self._grid, self._BLOCK],
             d_frame, beta, np.float32(self.gamma),
             self.d_leftW, self.d_upleftW, self.d_upW, self.d_uprightW, H, W)
-        cuda.synchronize()
+        # cuda.synchronize()
 
         # ── 6. lam scalar (download leftW + upW for max) ──────────────────────
         h_leftW = self.d_leftW.copy_to_host()
@@ -126,15 +124,15 @@ class GrabCut_CUDA_v0(GrabCut_Base):
                              else float(self.gamma) * LAM_FACTOR)
 
         # ── 7. Build t-links (GPU) ────────────────────────────────────────────
-        _build_tlinks_cuda[self._grid, self._BLOCK](
+        _, profiling_d['build tlinks'] = line_measurer_cuda(_build_tlinks_cuda[self._grid, self._BLOCK],
             self.d_gc_mask, self.d_nlp_bg, self.d_nlp_fg, lam,
             self.d_cap_src, self.d_cap_snk, H, W)
 
         # ── 8. Build n-links (GPU) ────────────────────────────────────────────
-        _build_nlinks_cuda[self._grid, self._BLOCK](
+        _, profiling_d['build nlinks'] = line_measurer_cuda(_build_nlinks_cuda[self._grid, self._BLOCK],
             self.d_leftW, self.d_upW,
             self.d_cap_right, self.d_cap_down, H, W)
-        cuda.synchronize()
+        # cuda.synchronize()
 
         # ── 9. Download cap arrays for CPU push_relabel ───────────────────────
         h_cap_src   = self.d_cap_src.copy_to_host()
@@ -143,10 +141,15 @@ class GrabCut_CUDA_v0(GrabCut_Base):
         h_cap_down  = self.d_cap_down.copy_to_host()
 
         # ── 10. Push-Relabel max-flow (CPU parallel @njit) ────────────────────
-        labeling = push_relabel(
+        labeling, profiling_d['push relabel'] = line_measurer(push_relabel,
             h_cap_src, h_cap_snk, h_cap_right, h_cap_down,
             H, W, PUSH_RELABEL_MAX_ITER, PUSH_RELABEL_RELABEL_FREQ,
         )
+
+        print('\n' + '---'*24)
+        for k, v in profiling_d.items():
+            print(f'{k}\t{v}')
+
         fg = (labeling == 0).reshape(int(H), int(W)).astype(np.uint8)
         np.multiply(fg, np.uint8(255), out=self._final_mask)
 
@@ -155,6 +158,7 @@ class GrabCut_CUDA_v0(GrabCut_Base):
                             H, W, radius=3)
         morphological_open(self._morph_tmp2, self._morph_tmp1, self._final_mask,
                            H, W, radius=2)
+
         np.copyto(self._final_mask,
                   largest_component(self._final_mask, H, W))
 
@@ -166,10 +170,6 @@ class GrabCut_CUDA_v0(GrabCut_Base):
         self.d_final_mask.copy_to_device(self._final_mask)
         _compose_blur_cuda[self._grid, self._BLOCK](
             d_frame, self.d_blurred, self.d_final_mask, self.d_composite, H, W)
-        cuda.synchronize()
-
-        return self._final_mask, self.d_composite.copy_to_host()
-
 
 # ── CUDA device helpers ───────────────────────────────────────────────────────
 

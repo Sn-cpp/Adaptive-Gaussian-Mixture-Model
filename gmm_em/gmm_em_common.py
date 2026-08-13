@@ -1,6 +1,8 @@
 import numpy as np
 from settings import MOG2_N_COMPONENTS
 
+from time import perf_counter
+
 class GMM_EM_Base:
     def __init__(self, height: int, width: int):
         self.H = height
@@ -21,19 +23,28 @@ class GMM_EM_Base:
         # Seed: uniform coefs so the first frame has a valid model
         for ci in range(self.K):
             self.model[ci, 0] = 1.0 / self.K
-
     
-    def fit(self, frame: np.ndarray, label_map: np.ndarray, is_fg: bool):
+    def fit(self, frame: np.ndarray, mask: np.ndarray, is_fg: bool):
         """Refit GMM from pixels of this class in the current frame.
 
         frame         : (H, W, 3) float32
-        label_map     : (H, W) uint8  — GC label map (0/1/2/3)
+        mask          : (H, W) uint8  — GC label map (0/1/2/3)
         is_fg         : bool
         """
+        t0 = perf_counter()
+        self._fit_kernel(frame, mask, is_fg)
+        return perf_counter() - t0
+
+    def neg_log_prob(self, frame, out):
+        """-log P(color | GMM) for every pixel → written into `out` (H,W) float32."""
+
+        t0 = perf_counter()
+        self._neg_log_prob_kernel(self, frame, out)
+        return perf_counter() - t0
+
+    def _fit_kernel(self, frame, mask, is_fg):
         raise NotImplementedError
 
-
-    def neg_log_prob(self, frame_bgr_f32, out):
-        """-log P(color | GMM) for every pixel → written into `out` (H,W) float32."""
+    def _neg_log_prob_kernel(self, frame, out):
         raise NotImplementedError
     

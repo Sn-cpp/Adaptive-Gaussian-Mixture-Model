@@ -1,1 +1,1 @@
-from .img_utils import to_planar, line_measurer
+from .img_utils import to_planar, line_measurer, line_measurer_cuda

@@ -50,17 +50,16 @@ class GrabCut_Numba(GrabCut_Base):
         _, profiling_d['make_gc'] = profiler_func(make_gc_mask, bg_prob, self._gc_mask)
  
         # 4 ── Dual spatial GMMs
-        img_f64 = frame.astype(np.float32)
-        _, profiling_d['bg fit'] = profiler_func(self._bg_gmm.fit, img_f64, self._gc_mask, is_fg=False)
-        _, profiling_d['fg fit'] = profiler_func(self._fg_gmm.fit, img_f64, self._gc_mask, is_fg=True)
+        _, profiling_d['bg fit'] = profiler_func(self._bg_gmm.fit, frame, self._gc_mask, is_fg=False)
+        _, profiling_d['fg fit'] = profiler_func(self._fg_gmm.fit, frame, self._gc_mask, is_fg=True)
 
         # 5 ── Neg-log-likelihood maps
-        _, profiling_d['bg nlp'] = profiler_func(self._bg_gmm.neg_log_prob, img_f64, self._nlp_bg)
-        _, profiling_d['fg nlp'] = profiler_func(self._fg_gmm.neg_log_prob, img_f64, self._nlp_fg)
+        _, profiling_d['bg nlp'] = profiler_func(self._bg_gmm.neg_log_prob, frame, self._nlp_bg)
+        _, profiling_d['fg nlp'] = profiler_func(self._fg_gmm.neg_log_prob, frame, self._nlp_fg)
 
         # 6 ── Beta + n-weights
-        beta, profiling_d['calc beta'] = profiler_func(calc_beta, img_f64)
-        _, profiling_d['calc nweights'] = profiler_func(calc_nweights, img_f64, beta, self.gamma,
+        beta, profiling_d['calc beta'] = profiler_func(calc_beta, frame)
+        _, profiling_d['calc nweights'] = profiler_func(calc_nweights, frame, beta, self.gamma,
                       self._leftW, self._upleftW, self._upW, self._uprightW)
 
         max_nw, profiling_d['max nw'] = profiler_func(lambda: max(float(self._leftW.max()), float(self._upW.max())))

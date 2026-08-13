@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from time import perf_counter
+from numba import cuda
 
 def to_planar(frame_bgr: np.ndarray, color=True):
     """(H, W, 3) uint8 BGR -> (C, H, W) float32 model input."""
@@ -12,6 +13,13 @@ def to_planar(frame_bgr: np.ndarray, color=True):
 def line_measurer(func, *args, **kwargs):
     t0 = perf_counter()
     ret = func(*args, **kwargs)
+    t1 = perf_counter()
+    return ret, (t1 - t0)*1000.0
+
+def line_measurer_cuda(func, *args, **kwargs):
+    t0 = perf_counter()
+    ret = func(*args, **kwargs)
+    cuda.synchronize()
     t1 = perf_counter()
     return ret, (t1 - t0)*1000.0
 

@@ -50,13 +50,7 @@ class GMM_EM_CUDA(GMM_EM_Base):
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def fit(self, d_frame, d_mask, is_fg: bool):
-        """Refit GMM from pixels of this class in the current frame.
-
-        d_frame : (H, W, 3) float32  device array
-        d_mask  : (H, W) uint8       device array  (GC labels 0/1/2/3)
-        is_fg   : bool
-        """
+    def _fit_device(self, d_frame, d_mask, is_fg: bool):
         K       = np.int32(self.K)
         H       = np.int32(self.H)
         W       = np.int32(self.W)
@@ -116,16 +110,36 @@ class GMM_EM_CUDA(GMM_EM_Base):
             self.cov_dets[ci] = det
             self.inv_covs[ci] = inv
 
-        # Push updated model back to device
-        self.d_model.copy_to_device(self.model)
-        self.d_inv_covs.copy_to_device(self.inv_covs)
-        self.d_cov_dets.copy_to_device(self.cov_dets)
+            # Push updated model back to device
+            self.d_model.copy_to_device(self.model)
+            self.d_inv_covs.copy_to_device(self.inv_covs)
+            self.d_cov_dets.copy_to_device(self.cov_dets)
 
-    def neg_log_prob(self, d_frame, d_out):
+    def _fit_kernel(self, frame, mask, is_fg):
+        d_frame = frame if hasattr(frame, "copy_to_host") else cuda.to_device(frame)
+        d_mask = mask if hasattr(mask, "copy_to_host") else cuda.to_device(mask)
+
+        self._fit_device(d_frame, d_mask, is_fg)
+        cuda.synchronize()
+        
+    def _neg_log_prob_kernel(self, frame, out):
         """-log P(color | GMM) for every pixel → written into d_out (H,W) float32."""
+
+        d_frame = frame if hasattr(frame, "copy_to_host") else cuda.to_device(frame)
+        if hasattr(out, "copy_to_host"):
+            d_out = out
+            mv_host = False 
+        else:
+            d_out = cuda.to_device(out)
+            mv_host = True
+
         _eval_gmm_cuda[self._grid, self._BLOCK](
             d_frame, self.d_model, self.d_inv_covs, self.d_cov_dets,
             d_out, np.int32(self.H), np.int32(self.W), np.int32(self.K))
+        cuda.synchronize()
+
+        if mv_host:
+            out = d_out.copy_to_host()
 
 
 # ── CUDA device helpers ───────────────────────────────────────────────────────
