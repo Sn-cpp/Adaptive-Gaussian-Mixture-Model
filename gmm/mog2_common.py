@@ -19,9 +19,9 @@ import numpy as np
 
 from settings import (
     MOG2_BACKGROUND_RATIO, MOG2_CONSERVATIVE_UPDATE, MOG2_CT,
-    MOG2_DETECT_SHADOWS, MOG2_HISTORY, MOG2_SHADOW_TAU, MOG2_SHADOW_VALUE,
-    MOG2_VAR_INIT, MOG2_VAR_MAX, MOG2_VAR_MIN, MOG2_VAR_THRESHOLD,
-    MOG2_VAR_THRESHOLD_GEN, BLUR_KSIZE, BLUR_SIGMA,
+    MOG2_DETECT_SHADOWS, MOG2_HISTORY, MOG2_PROTECT_EXIT, MOG2_SHADOW_TAU,
+    MOG2_SHADOW_VALUE, MOG2_VAR_INIT, MOG2_VAR_MAX, MOG2_VAR_MIN,
+    MOG2_VAR_THRESHOLD, MOG2_VAR_THRESHOLD_GEN, BLUR_KSIZE, BLUR_SIGMA,
 )
 
 
@@ -44,7 +44,8 @@ def kernel_args(alpha, var_threshold=MOG2_VAR_THRESHOLD,
                 var_max=MOG2_VAR_MAX, ct=MOG2_CT, tau=MOG2_SHADOW_TAU,
                 shadow_value=MOG2_SHADOW_VALUE,
                 detect_shadows=MOG2_DETECT_SHADOWS,
-                conservative=MOG2_CONSERVATIVE_UPDATE):
+                conservative=MOG2_CONSERVATIVE_UPDATE,
+                protect_exit=MOG2_PROTECT_EXIT):
     """Scalar arguments every backend kernel takes, in one fixed order."""
     return (
         np.float32(alpha),
@@ -59,6 +60,7 @@ def kernel_args(alpha, var_threshold=MOG2_VAR_THRESHOLD,
         np.uint8(shadow_value),
         bool(detect_shadows),
         bool(conservative),
+        np.float32(protect_exit),       # Te
     )
 
 
@@ -116,6 +118,12 @@ class MOG2Base:
     #: the confidence must refuse to run rather than segment a field of zeros.
     FILLS_BG_PROB = False
 
+    #: Frame-wide backstop for the conservative update — see
+    #: `protection_ran_away`. Together with `MOG2_PROTECT_EXIT` this is what
+    #: stops a global appearance change freezing the whole frame for ever.
+    CONSERVATIVE_MAX_COVERAGE = 0.5
+
+
     """State allocation and parameter bookkeeping shared by the three backends.
 
     Subclasses only implement `_step_kernel`. Nothing is ever reallocated after
@@ -130,22 +138,27 @@ class MOG2Base:
                  var_max=MOG2_VAR_MAX, ct=MOG2_CT, tau=MOG2_SHADOW_TAU,
                  shadow_value=MOG2_SHADOW_VALUE,
                  detect_shadows=MOG2_DETECT_SHADOWS,
-                 conservative=MOG2_CONSERVATIVE_UPDATE, *arg, **kwargs):
+                 conservative=MOG2_CONSERVATIVE_UPDATE,
+                 protect_exit=MOG2_PROTECT_EXIT, *arg, **kwargs):
         """`conservative` freezes the model wherever the *previous* frame was
         classified foreground: that pixel runs with alpha = 0 and prune = 0, so
         its Gaussians keep their weights, means and variances untouched and no
-        new mode is created. Classification still runs, against the frozen
-        model, which is what releases the pixel again — once the subject moves
-        away the pixel matches the background it was frozen at, is classified
-        background, and resumes updating on the next frame. That makes the
-        hysteresis free: no timer, no second model, no extra state.
+        new mode is created.
 
-        The one case it cannot recover from is a background that genuinely
-        changed while protected — a chair pushed aside, a door left open. Such
-        a pixel never matches the frozen model again and stays foreground for
-        good. ViBe answers that with random spatial propagation, which is not
-        implemented here — see the measurements in `docs/conservative.md` for
-        how often it actually bites on the test clip.
+        Protection is held only while the pixel is still far from the
+        background it was frozen at — `dist2 >= protect_exit * var` against its
+        dominant mode. That second, looser threshold is what makes the rule
+        safe. Releasing on ordinary classification instead is the obvious
+        design and it is a trap: it works for a subject who walks away, and
+        latches the entire frame for ever on a global appearance change. See
+        `MOG2_PROTECT_EXIT` in settings for the measurement and the reason
+        there is no escape from inside that version of the rule.
+
+        What is left is a *local* background change while protected — a chair
+        pushed aside, a door opened — where the new appearance happens to sit
+        beyond the exit threshold. That pixel stays foreground until something
+        moves through it. ViBe answers this with random spatial propagation,
+        which is not implemented here.
         """
         self.height, self.width = first_frame.shape[:2]
         self.n_comps = int(n_components)
@@ -158,7 +171,7 @@ class MOG2Base:
             background_ratio=background_ratio, var_init=var_init,
             var_min=var_min, var_max=var_max, ct=ct, tau=tau,
             shadow_value=shadow_value, detect_shadows=detect_shadows,
-            conservative=conservative,
+            conservative=conservative, protect_exit=protect_exit,
         )
 
         K, C, H, W = self.n_comps, self.n_channels, self.height, self.width
@@ -178,7 +191,34 @@ class MOG2Base:
         """Per-frame scalar args — alpha follows OpenCV's warm-up ramp."""
         self.nframes += 1
         self.alpha = learning_rate(update_alpha, self.nframes, self.history)
-        return kernel_args(self.alpha, **self._params)
+        params = self._params
+        if params['conservative'] and self.protection_ran_away():
+            params = dict(params, conservative=False)
+        return kernel_args(self.alpha, **params)
+
+    def protection_ran_away(self):
+        """Was so much of the last frame foreground that this cannot be a subject?
+
+        The per-pixel exit threshold handles a moderate global shift, but it is
+        measured against each mode's own variance, and a well-converged
+        background pixel has a tiny variance — so a large step still looks
+        "far" everywhere at once and everything freezes. This is the backstop
+        for that: a person is not most of the frame, an exposure step is, so
+        above `CONSERVATIVE_MAX_COVERAGE` protection is dropped for one frame
+        and the model is allowed to catch up. The next frame protects again.
+
+        A subject who genuinely fills more than half the frame runs with
+        protection off — plain MOG2 behaviour, which is a graceful degradation
+        rather than a frozen screen.
+
+        Subsampled 4x4: this asks about a frame-wide effect, so a sixteenth of
+        the pixels answer it as well and cost 0.03 ms at 1080p, not 0.5 ms.
+        Reads the host `mask`, which `step` keeps current for every backend;
+        `CUDAPipeline.process_stream` bypasses `step`, but that is the
+        benchmark harness and never enables conservative.
+        """
+        sub = self.mask[::4, ::4]
+        return np.count_nonzero(sub == 255) > sub.size * self.CONSERVATIVE_MAX_COVERAGE
 
     def step(self, frame, update_alpha=-1.0):
         """One MOG2 pass over a planar (C, H, W) float32 frame -> (mask, seconds).

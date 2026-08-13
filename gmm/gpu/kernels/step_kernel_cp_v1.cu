@@ -71,7 +71,8 @@ extern "C" __global__ void step_gmm(
     const float tau,
     const unsigned char shadow_val,
     const bool detect_shadows,
-    const bool conservative) {
+    const bool conservative,
+    const float Te) {
         // Thread coordinating values
         int x = blockIdx.x * blockDim.x + threadIdx.x;
         int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -94,14 +95,23 @@ extern "C" __global__ void step_gmm(
                 // Conservative update -- see GMM_cpu.mog2_step. mask[i] still
                 // holds the previous frame's decision for this pixel. Note the
                 // grid-stride loop: alpha has to be recomputed per pixel here,
-                // not hoisted above the loop.
+                // not hoisted above the loop. Te is the loose exit threshold
+                // that stops a global appearance change latching every pixel.
                 float alpha = alpha_in;
                 float prune = prune_in;
                 float alpha1 = alpha1_in;
-                if (conservative && mask[i] == 255) {
-                    alpha = 0.0f;
-                    prune = 0.0f;
-                    alpha1 = 1.0f;
+                if (conservative && mask[i] == 255 && modes[i] > 0) {
+                    float d0 = 0.0f;
+                    for (int c = 0; c < C; c++) {
+                        float dd = means[(long long) (c*num_pixels + i)]
+                                 - frame[(long long) (c*num_pixels + i)];
+                        d0 += dd * dd;
+                    }
+                    if (d0 >= Te * vars_[i]) {
+                        alpha = 0.0f;
+                        prune = 0.0f;
+                        alpha1 = 1.0f;
+                    }
                 }
 
                 bool background = false;

@@ -37,7 +37,7 @@ def detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
 
 def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
               alpha_in, prune_in, Tb, Tg, TB, var_init, var_min, var_max,
-              tau, shadow_val, detect_shadows, conservative):
+              tau, shadow_val, detect_shadows, conservative, Te):
     K = weights.shape[0]
     C = means.shape[1]
     H, W = frame.shape[1], frame.shape[2]
@@ -52,11 +52,22 @@ def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
             # leaves the means and variances alone and stops a new mode being
             # created; prune = 0 is just as necessary, or the weights would
             # keep decaying and the modes would be pruned away underneath us.
+            #
+            # Held only while the pixel is still *far* from the background it
+            # was frozen at, measured against the dominant mode with the loose
+            # threshold Te. Without that gate a global appearance change
+            # freezes every pixel at the old exposure and none can ever track
+            # the new one — see MOG2_PROTECT_EXIT.
             alpha, prune, alpha1 = alpha_in, prune_in, alpha1_in
-            if conservative and mask[y, x] == 255:
-                alpha = np.float32(0.0)
-                prune = np.float32(0.0)
-                alpha1 = np.float32(1.0)
+            if conservative and mask[y, x] == 255 and modes[y, x] > 0:
+                d0 = np.float32(0.0)
+                for c in range(C):
+                    dd = means[0, c, y, x] - frame[c, y, x]
+                    d0 += dd * dd
+                if d0 >= Te * vars_[0, y, x]:
+                    alpha = np.float32(0.0)
+                    prune = np.float32(0.0)
+                    alpha1 = np.float32(1.0)
 
             background = False
             fits_pdf = False

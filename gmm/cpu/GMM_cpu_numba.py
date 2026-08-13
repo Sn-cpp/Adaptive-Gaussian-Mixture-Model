@@ -39,7 +39,7 @@ def _detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
 @njit(parallel=True, **_JIT)
 def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
               alpha_in, prune_in, Tb, Tg, TB, var_init, var_min, var_max,
-              tau, shadow_val, detect_shadows, conservative):
+              tau, shadow_val, detect_shadows, conservative, Te):
     K = weights.shape[0]
     C = means.shape[1]
     H = frame.shape[1]
@@ -49,15 +49,22 @@ def mog2_step(frame, weights, means, vars_, modes, mask, bg_prob,
     for y in prange(H):
         dData = np.empty(C, dtype=np.float32)
         for x in range(W):
-            # Conservative update — see `GMM_cpu.mog2_step`, this is the same
-            # four lines. `mask` still holds the previous frame's decision.
+            # Conservative update — see `GMM_cpu.mog2_step`, same lines.
+            # `mask` still holds the previous frame's decision, and Te is the
+            # loose exit threshold that stops a global appearance change
+            # latching the whole frame.
             alpha = alpha_in
             prune = prune_in
             alpha1 = alpha1_in
-            if conservative and mask[y, x] == np.uint8(255):
-                alpha = np.float32(0.0)
-                prune = np.float32(0.0)
-                alpha1 = np.float32(1.0)
+            if conservative and mask[y, x] == np.uint8(255) and modes[y, x] > 0:
+                d0 = np.float32(0.0)
+                for c in range(C):
+                    dd = means[0, c, y, x] - frame[c, y, x]
+                    d0 += dd * dd
+                if d0 >= Te * vars_[0, y, x]:
+                    alpha = np.float32(0.0)
+                    prune = np.float32(0.0)
+                    alpha1 = np.float32(1.0)
 
             background = False
             fits_pdf = False

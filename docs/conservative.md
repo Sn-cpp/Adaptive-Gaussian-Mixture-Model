@@ -42,7 +42,7 @@ Reproduce with `python docs/experiment_cleanplate.py`.
 | present from frame 0, plain    | 0.000 |            0.000 |           0.000 |               200/200 |
 | present from frame 0, conserv. | 0.000 |            0.000 |           0.000 |               200/200 |
 | clean plate, plain MOG2        | 0.070 |            0.696 |           0.000 |               186/200 |
-| **clean plate + conservative** | **0.972** |        **0.991** |       **0.961** |             **0/200** |
+| **clean plate + conservative** | **0.965** |        **0.990** |       **0.953** |             **0/200** |
 
 ![clean plate](conservative_cleanplate.png)
 
@@ -84,7 +84,68 @@ is what `tests/` asserts.
 All four backends were checked against each other on a real T4, with the option
 both off and on: the sequential Python spec, the Numba CPU kernel, the Numba
 CUDA kernel and the CuPy `RawKernel` produce **identical masks, zero pixels
-differing**, and `pytest tests/` is 66 passed with nothing skipped.
+differing**, with `bg_prob` agreeing to 2.09e-07 — float32 rounding. Re-run at
+each HEAD that touches a kernel; an earlier version of this file quoted a check
+made *before* `f2bdaf4` restored the pruning `GMM_CUPY` was skipping, which is
+exactly the window in which the claim was false.
+
+## The trap in "release by classification"
+
+Freezing a pixel is the easy half. Releasing it is where this goes wrong, and
+the obvious design — release when the frozen model classifies the pixel as
+background again — is a trap.
+
+It works for the case it was designed for: the subject walks away, the pixel
+returns to the colour it was frozen at, it matches, it resumes updating. It
+fails absolutely for a *global* appearance change. A webcam auto-exposing turns
+most of the frame foreground in a single frame; every one of those pixels then
+freezes at the **old** exposure; and none of them can ever track the new one,
+because release would need `dist2 < Tb * var` with `var <= var_max`, which at
+the defaults a uniform shift beyond about 20 levels per channel can never
+satisfy — at any learning rate, for ever. Measured on `highway` with a uniform
++25 grey-level step at frame 150, raw mask coverage:
+
+| | +50 frames | +150 | +400 | +700 |
+| --- | ---: | ---: | ---: | ---: |
+| plain MOG2 | 0.652 | 0.127 | 0.005 | 0.139 |
+| release-by-classification | 0.904 | 0.855 | 0.845 | **0.826** |
+
+Plain MOG2 reabsorbs the step within about 150 frames. The naive protected
+version is still 83% foreground 700 frames later — a frozen screen, on a demo
+whose input device auto-exposes.
+
+Two mechanisms fix it, and both are needed:
+
+- **`MOG2_PROTECT_EXIT`** — a second, looser threshold. Protection is held only
+  while the pixel is still *far* from its dominant frozen mode. A global
+  photometric shift is a moderate distance; a person against a wall is a large
+  one.
+- **`MOG2Base.CONSERVATIVE_MAX_COVERAGE`** — a frame-wide backstop, because the
+  per-pixel rule measures distance against each mode's *own* variance and a
+  well-converged background pixel has almost none, so a big step still looks
+  far everywhere at once. A person is not most of the frame; an exposure step
+  is. Above this fraction, protection is dropped for one frame.
+
+Swept together against everything they trade off (plain MOG2 scores 0.028 on
+the latch column):
+
+| `Te` | latch, +25 step | clean-plate IoU | webcam coverage / frames lost |
+| ---: | ---: | ---: | --- |
+| 0 (backstop only) | 0.199 | 0.961 | 31.2% / 9 |
+| 36 | 0.115 | 0.959 | 30.0% / 9 |
+| **64** *(shipping)* | **0.083** | **0.953** | 29.5% / 9 |
+| 100 | 0.047 | 0.936 | 29.2% / 9 |
+| 144 | 0.030 | 0.888 | 29.1% / 9 |
+
+64 keeps the capability the feature exists for and brings the latch within a
+small multiple of plain MOG2. `test_a_global_exposure_change_does_not_latch_the_frame`
+pins it, and asserts the failure still reproduces with both mechanisms disabled
+so the guard cannot quietly become vacuous.
+
+What remains: a *local* background change while protected — a chair pushed
+aside — where the new appearance sits beyond the exit threshold. That pixel
+stays foreground until something moves through it. ViBe answers this with
+random spatial propagation, not implemented here.
 
 ## What it does *not* fix
 

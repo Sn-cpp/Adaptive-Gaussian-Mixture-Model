@@ -38,6 +38,37 @@ MOG2_DETECT_SHADOWS = False
 # than a moving car. See `MOG2Base.__init__` for the exact semantics.
 MOG2_CONSERVATIVE_UPDATE = False
 
+# Exit threshold for the protection, in units of the mode's variance, and the
+# thing that stops the conservative update latching the whole frame.
+#
+# Protection is held only while the pixel is still *far* from the background it
+# was frozen at. Releasing on ordinary classification instead (`Tb` = 16) is a
+# trap: a webcam auto-exposing shifts every pixel at once, all of them freeze
+# at the old exposure, and none can ever come back, because release would need
+# `dist2 < Tb*var` with `var <= 75` — unreachable beyond about 20 levels per
+# channel, at any learning rate, for ever. Measured on highway with a +25 step,
+# raw coverage 700 frames later: plain 0.139, protected-until-classified 0.826.
+#
+# A global photometric shift is *moderate* distance; a person against a wall is
+# large. This threshold separates them, and it works together with
+# `MOG2Base.CONSERVATIVE_MAX_COVERAGE`, which is the frame-wide backstop for
+# the case a per-pixel rule cannot see. Swept over all three things it trades
+# off — the +25 latch test, the composited stationary-subject IoU, and the
+# webcam clip (plain MOG2 scores 0.028 on the latch test):
+#
+#     Te     latch    clean-plate IoU   webcam coverage / frames lost
+#      0     0.199        0.961            31.2%  9
+#     36     0.115        0.959            30.0%  9
+#     64     0.083        0.953            29.5%  9
+#    100     0.047        0.936            29.2%  9
+#    144     0.030        0.888            29.1%  9
+#
+# 64 keeps the capability the whole feature exists for (a motionless subject
+# held at IoU 0.95) while bringing the latch within a small multiple of plain
+# MOG2. Raise it if a demo room has strong lighting changes; lower it if a
+# stationary subject is being dropped.
+MOG2_PROTECT_EXIT = np.float32(64.0)
+
 FLT_EPSILON = np.float32(1.1920929e-07)
 
 # Post-processing

@@ -73,12 +73,14 @@ the display stays BGR — on CDnet `highway` this lifts mask F1 from 0.73 to 0.8
 of shot while it does. `--conservative` (on by default in `main.py`, off
 everywhere else) stops a subject who holds still from being absorbed back into
 the background. The two go together and neither works alone — see
-[docs/conservative.md](docs/conservative.md).
+[docs/conservative.md](docs/conservative.md), which also covers the exposure
+latch that a naive version of the protection rule causes and the two thresholds
+that prevent it.
 
 Model defaults match OpenCV and live in `settings.py`.
 
 The full blur pipeline —
-`frame → MOG2 step (mask) → morphological open → separable blur ⨝ composite`:
+`frame → MOG2 step (mask) → morphological close → separable blur ⨝ composite`:
 
 ```python
 from gmm import GMM_CPU_NUMBA          # or GMM_CUDA
@@ -227,7 +229,7 @@ at frame 60 and then never moving again. IoU on the subject, 200 scored frames
 | present from frame 0, plain | 0.000 | 0.000 | 0.000 | 200/200 |
 | present from frame 0, conservative | 0.000 | 0.000 | 0.000 | 200/200 |
 | clean plate, plain MOG2 | 0.070 | 0.696 | 0.000 | 186/200 |
-| **clean plate + conservative** | **0.972** | **0.991** | **0.961** | **0/200** |
+| **clean plate + conservative** | **0.965** | **0.990** | **0.953** | **0/200** |
 
 Plain MOG2 detects the subject cleanly on entry and has lost it one second
 later. Conservative update without a clean plate cannot help at all: it protects
@@ -237,8 +239,8 @@ before anything runs.
 That last row is also the honest limit of `LTSSUD-Test.mp4`, the 1080p clip in
 this repo: the person is seated from frame 0 and never leaves, so no clean plate
 exists and the mask degenerates to an outline of whatever moved. Post-processing
-recovers most of the silhouette anyway — coverage 8.9% → 27.8% against a subject
-truly occupying 25–30%, frames with the subject missing 137 → 10 of 310 — but it
+recovers most of the silhouette anyway — coverage 8.9% → 27.6% against a subject
+truly occupying 25–30%, frames with the subject missing 137 → 9 of 310 — but it
 cannot invent an interior where the outline itself is absent.
 `docs/conservative.md` has the pictures and the cost on `highway`
 (F1 0.9338 → 0.9283, precision traded for recall).

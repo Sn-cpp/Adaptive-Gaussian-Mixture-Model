@@ -54,7 +54,7 @@ def _detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
 @cuda.jit
 def mog2_step_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
                      alpha_in, prune_in, Tb, Tg, TB, var_init, var_min, var_max,
-                     tau, shadow_val, detect_shadows, conservative):
+                     tau, shadow_val, detect_shadows, conservative, Te):
     x, y = cuda.grid(2)
     H = frame.shape[1]
     W = frame.shape[2]
@@ -67,14 +67,21 @@ def mog2_step_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
 
     # Conservative update — see `GMM_cpu.mog2_step`. `mask` still holds the
     # previous frame's decision: this thread wrote its own pixel last frame and
-    # no other thread touches it, so there is nothing to synchronise.
+    # no other thread touches it, so there is nothing to synchronise. Te is the
+    # loose exit threshold; without it a global appearance change latches every
+    # pixel at once and none can recover.
     alpha = alpha_in
     prune = prune_in
     alpha1 = float32(1.0) - alpha_in
-    if conservative and mask[y, x] == uint8(255):
-        alpha = float32(0.0)
-        prune = float32(0.0)
-        alpha1 = float32(1.0)
+    if conservative and mask[y, x] == uint8(255) and modes[y, x] > 0:
+        d0 = float32(0.0)
+        for c in range(C):
+            dd = means[0, c, y, x] - frame[c, y, x]
+            d0 += dd * dd
+        if d0 >= Te * vars_[0, y, x]:
+            alpha = float32(0.0)
+            prune = float32(0.0)
+            alpha1 = float32(1.0)
 
     background = False
     fits_pdf = False
