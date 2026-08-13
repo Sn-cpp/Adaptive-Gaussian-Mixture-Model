@@ -1,6 +1,8 @@
+import argparse
 import cv2
 import os
 import glob
+import re
 
 def images_to_video(image_folder, output_video_path, file_type: str="jpg", output_video_len_in_seconds: int=-1, fps=30):
     # Find all images in the directory
@@ -8,7 +10,11 @@ def images_to_video(image_folder, output_video_path, file_type: str="jpg", outpu
     image_files = glob.glob(os.path.join(image_folder, f"*.{file_type}"))
     
     # Sort files alphanumeric so they sequence correctly (e.g., frame1, frame2...)
-    image_files.sort(key=lambda f: [int(c) if c.isdigit() else c for c in os.path.split(f)[-1].replace('.', '').split()])
+    # str.split() with no argument splits on whitespace, and image filenames have
+    # none — so the comprehension saw one long token and never isolated a digit,
+    # sorting frame10 before frame1. Split on runs of digits instead.
+    image_files.sort(key=lambda f: [int(c) if c.isdigit() else c
+                                    for c in re.split(r'(\d+)', os.path.basename(f))])
 
     if not image_files:
         print(f"No .{file_type} images found in the specified directory.")
@@ -45,6 +51,16 @@ def images_to_video(image_folder, output_video_path, file_type: str="jpg", outpu
     video_writer.release()
     print(f"Video successfully saved to: {output_video_path}")
 
-# Example Usage:
-images_to_video('datasets/dataset2012/dataset/baseline/highway/input', 'input.mp4', 'jpg', 120, fps=30)
-images_to_video('datasets/dataset2012/dataset/baseline/highway/groundtruth', 'groundtruth.mp4', 'png', 120, fps=30)
+if __name__ == "__main__":
+    # These used to sit at module scope, so importing this file rebuilt
+    # input.mp4 and groundtruth.mp4 in the repo root from a dataset path that
+    # is not checked in — overwriting both with nothing.
+    ap = argparse.ArgumentParser(description="Turn a folder of frames into a video.")
+    ap.add_argument("image_folder")
+    ap.add_argument("output_video_path")
+    ap.add_argument("--file_type", default="jpg")
+    ap.add_argument("--seconds", type=int, default=-1,
+                    help="-1 uses every frame in the folder")
+    ap.add_argument("--fps", type=int, default=30)
+    a = ap.parse_args()
+    images_to_video(a.image_folder, a.output_video_path, a.file_type, a.seconds, a.fps)

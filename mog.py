@@ -1,16 +1,24 @@
+import sys
+
 import cv2
-from utils import mask_refiner
 import numpy as np
+
+from utils import mask_refiner
 
 # 1. Create the background subtractor object
 back_sub = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=False)
 
-# 2. Open the video source (0 for webcam, or path to a video file)
-capture = cv2.VideoCapture(0)
-# capture = cv2.VideoCapture("input.mp4")
+# 2. Open the video source: a path on the command line, else the default camera.
+source = sys.argv[1] if len(sys.argv) > 1 else 0
+capture = cv2.VideoCapture(source)
+if not capture.isOpened():
+    raise SystemExit(f"Cannot open {source!r}. Pass a video file as the first argument.")
 
 
 dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+
+HOLD_FRAMES = 15          # ~0.5 s at 30 FPS
+last_mask, held = None, 0
 
 while True:
     ret, frame = capture.read()
@@ -74,6 +82,16 @@ while True:
                 color=255, 
                 thickness=cv2.FILLED
             )
+
+    # When the heuristic finds nothing, elip_mask is all zeros and copyTo blurs
+    # the entire frame — the subject vanishes. Measured on input.mp4: 13 of 300
+    # frames. Hold the last ellipse instead, for a bounded number of frames, so
+    # a momentary miss does not wipe the picture but a subject who has actually
+    # left does eventually stop being cut out.
+    if elip_mask.any():
+        last_mask, held = elip_mask, 0
+    elif last_mask is not None and held < HOLD_FRAMES:
+        elip_mask, held = last_mask, held + 1
 
     blur = cv2.GaussianBlur(frame, (15, 15), 0)
     result = cv2.copyTo(frame, elip_mask, blur)

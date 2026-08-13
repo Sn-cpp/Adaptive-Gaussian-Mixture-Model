@@ -23,6 +23,12 @@ GPU_MODELS = [GMM_CUPY, GMM_CUDA]
 CUPY_MODELS = (GMM_CUPY,)
 
 
+def model_id(cls):
+    """A GPU backend is None when its toolkit or device is missing, and None has
+    no __name__ — which used to break collection rather than skip the test."""
+    return cls.__name__ if cls is not None else "unavailable"
+
+
 def cupy_is_mocked():
     """conftest swaps in a MagicMock for cupy so the module tree imports here.
 
@@ -58,7 +64,7 @@ def drive(model_cls, seq):
     return masks
 
 
-@pytest.mark.parametrize('model_cls', CPU_MODELS, ids=lambda c: c.__name__)
+@pytest.mark.parametrize('model_cls', CPU_MODELS, ids=model_id)
 def test_model_runs(model_cls):
     seq = frames()
     masks = drive(model_cls, seq)
@@ -69,7 +75,7 @@ def test_model_runs(model_cls):
             f"{model_cls.__name__}: unexpected mask values {np.unique(m)}"
 
 
-@pytest.mark.parametrize('model_cls', CPU_MODELS, ids=lambda c: c.__name__)
+@pytest.mark.parametrize('model_cls', CPU_MODELS, ids=model_id)
 def test_mask_is_not_degenerate(model_cls):
     """A backend that calls every pixel foreground (or background) is broken.
 
@@ -84,7 +90,7 @@ def test_mask_is_not_degenerate(model_cls):
     assert 0.0 < fg < 0.9, f"{model_cls.__name__}: degenerate mask, fg={fg:.3f}"
 
 
-@pytest.mark.parametrize('model_cls', GPU_MODELS, ids=lambda c: c.__name__)
+@pytest.mark.parametrize('model_cls', GPU_MODELS, ids=model_id)
 def test_gpu_model_runs(model_cls):
     if model_cls is None:
         pytest.skip("GPU model unavailable — cupy / numba.cuda not installed")

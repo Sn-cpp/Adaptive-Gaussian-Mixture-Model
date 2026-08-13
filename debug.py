@@ -52,10 +52,15 @@ if __name__ == "__main__":
 
     running = True if input_source.isOpened() else False
 
-    while True:
+    if not input_source.isOpened():
+        raise SystemExit(f"Cannot open input source {input_path!r}.")
+
+    for _ in range(30):
         flag, first_frame = input_source.read()
         if flag:
             break
+    else:
+        raise SystemExit(f"{input_path!r} opened but produced no frame in 30 tries.")
 
 
     # --------------------------------------------------------------------------------------
@@ -113,7 +118,7 @@ if __name__ == "__main__":
         planar_frame = frame.transpose(2, 0, 1).astype(np.float32)
 
         mask, time_cost = model.step(planar_frame, update_alpha)
-        model_fps = int(1/time_cost)
+        model_fps = 1.0 / max(time_cost, 1e-9)
 
         # _, write_cost = cpu_timer(model_fps_graph.write_value, value=model_fps, last_value=last_fps, color=(0, 0, 255))
         # print(write_cost)

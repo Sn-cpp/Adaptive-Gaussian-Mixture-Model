@@ -16,13 +16,23 @@ def gmm_video(input_path: str, output_path: str, fps: float,
     # Initialize the video capture object
     cap = cv2.VideoCapture(input_path)
 
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open {input_path}")
+
+    # `fraction` used to be applied only after the whole clip was decoded into a
+    # list, so it saved compute but not memory: 2.2 GB resident to process a
+    # single 1080p frame. Decide the budget up front and read only that many.
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    limit = max(1, int(total * fraction)) if total else None
+
     frames = []
-    while cap.isOpened():
+    while True:
         ret, frame = cap.read()
         if not ret:
             break
-        # Add the Mat frame to our list
         frames.append(frame)
+        if limit is not None and len(frames) >= limit:
+            break
     cap.release()
 
     if not frames:
@@ -36,7 +46,7 @@ def gmm_video(input_path: str, output_path: str, fps: float,
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     video_writer = cv2.VideoWriter(output_path, fourcc, fps, video_dims)
 
-    process_frames = frames[:max(1, int(len(frames) * fraction))]
+    process_frames = frames if limit is not None else frames[:max(1, int(len(frames) * fraction))]
     model = GMM_CPU(process_frames[0], n_components=n_components)
 
     for frame in tqdm(process_frames):

@@ -53,12 +53,20 @@ if __name__ == "__main__":
     CAM_WIDTH = input_source.get(cv2.CAP_PROP_FRAME_WIDTH)
     CAM_HEIGHT = input_source.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    running = True if input_source.isOpened() else False
+    if not input_source.isOpened():
+        raise SystemExit(f"Cannot open input source {input_path!r}. Pass a video "
+                         f"file with --input_path, or 0 for the default camera.")
 
-    while True:
+    running = True
+
+    # A capture that opens but yields nothing (a disconnected camera, a codec the
+    # build cannot decode) used to spin here for ever with no output at all.
+    for _ in range(30):
         flag, first_frame = input_source.read()
         if flag:
             break
+    else:
+        raise SystemExit(f"{input_path!r} opened but produced no frame in 30 tries.")
 
 
     # --------------------------------------------------------------------------------------
@@ -97,14 +105,16 @@ if __name__ == "__main__":
         planar_frame = to_model(frame).transpose(2, 0, 1).astype(np.float32)
 
         mask, time_cost = model.step(planar_frame)
-        model_fps = int(1 / max(time_cost, 1e-9))
+        # Not int(): the sequential reference runs below 1 FPS, and the whole
+        # point of the comparison is that number. int() rendered it as "0".
+        model_fps = 1.0 / max(time_cost, 1e-9)
 
         # mask_refiner binarises: MOG2's shadow value (127) counts as background.
         refined_mask = mask_refiner(mask)
         result = background_subtractor(frame, refined_mask)
 
         cv2.putText(result,
-            f"{model_fps}",
+            f"{model_fps:.2f} FPS" if model_fps < 10 else f"{model_fps:.0f} FPS",
             (5, 25),
             cv2.FONT_HERSHEY_TRIPLEX,
             1,

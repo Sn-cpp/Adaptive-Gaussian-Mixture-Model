@@ -57,11 +57,18 @@ if __name__ == "__main__":
 
     running = True if input_source.isOpened() else False
 
-    while True:
+    if not input_source.isOpened():
+        raise SystemExit(f"Cannot open input source {input_path!r}.")
+    if not groundtruth_source.isOpened():
+        raise SystemExit(f"Cannot open groundtruth source {groundtruth_path!r}.")
+
+    for _ in range(30):
         input_flag, first_frame = input_source.read()
         gth_flag, _ = groundtruth_source.read()
         if input_flag and gth_flag:
             break
+    else:
+        raise SystemExit("Input or groundtruth opened but produced no frame in 30 tries.")
     
 
     # --------------------------------------------------------------------------------------
@@ -173,11 +180,11 @@ if __name__ == "__main__":
             cv2.imshow("Groundtruth and Models' masks", mask_grid)
 
             # Write FPS values
-            fps_cpu = int(1 / cpu_cost)
-            fps_model = int(1 / model_cost)
+            fps_cpu = 1.0 / max(cpu_cost, 1e-9)
+            fps_model = 1.0 / max(model_cost, 1e-9)
             fps_graph.write_value(fps_cpu, cpu_fps_last, (0, 255, 0))
             fps_graph.write_value(fps_model, model_fps_last, (0, 0, 255))
-            fps_graph.display(f"CPU: {fps_cpu} | {model_list[model_choice][0]}: {fps_model}", (5, 30))
+            fps_graph.display(f"CPU: {fps_cpu:.2f} | {model_list[model_choice][0]}: {fps_model:.1f}", (5, 30))
 
             # Compute IOU for each models
             iou_mog2 = compute_iou(refined_mask_mog2, ground)
@@ -191,7 +198,10 @@ if __name__ == "__main__":
             iou_graph.display()
 
             # Compute MAE between CPU and Model masks
-            abs_err = np.abs(refined_cpu - refined_model) / 255
+            # Both masks are uint8, so a plain subtraction wraps before np.abs
+            # sees it: cpu=0 against model=255 gave 1, not 255, understating
+            # the disagreement 255-fold. They are binary anyway.
+            abs_err = refined_cpu != refined_model
             mae = abs_err.mean()
             mae_graph.write_value(mae, mask_mae_last, (0, 0, 255))
             mae_graph.display(f"{mae:2f}", (300, 15))
