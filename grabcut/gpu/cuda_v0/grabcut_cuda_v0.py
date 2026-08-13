@@ -82,7 +82,11 @@ class GrabCut_CUDA_v0(GrabCut_Base):
         H, W = np.int32(self.H), np.int32(self.W)
 
         profiling_d = dict()
-        profiler_func = line_measurer_cuda if profiling else (lambda func, *args, **kwargs: func(*args, **kwargs))
+        # Every call site unpacks (result, seconds); the non-profiling branch
+        # returned only the result, so apply(profiling=False) — the default,
+        # and what main.py uses — raised TypeError on the first frame.
+        profiler_func = (line_measurer_cuda if profiling else
+                         (lambda func, *args, **kwargs: (func(*args, **kwargs), 0.0)))
 
         # ── 1. GC label map ───────────────────────────────────────────────────
 

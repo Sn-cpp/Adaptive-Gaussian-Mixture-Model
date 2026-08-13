@@ -44,7 +44,12 @@ class GrabCut_Numba(GrabCut_Base):
         H, W = self.H, self.W
 
         profiling_d = dict()
-        profiler_func = line_measurer if profiling else (lambda func, *args, **kwargs: func(*args, **kwargs))
+        # Every call site unpacks (result, seconds). The non-profiling branch
+        # used to return just the result, so apply(profiling=False) — the
+        # default, and what main.py uses — raised TypeError on the first
+        # frame. Return the same shape either way.
+        profiler_func = (line_measurer if profiling else
+                         (lambda func, *args, **kwargs: (func(*args, **kwargs), 0.0)))
 
         # 
         _, profiling_d['make_gc'] = profiler_func(make_gc_mask, bg_prob, self._gc_mask)
