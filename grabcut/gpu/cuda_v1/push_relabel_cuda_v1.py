@@ -20,7 +20,10 @@ is the natural mapping. No RCSR needed — reverse edges are structurally known:
   left[n]  ↔ right[n-1],  up[n] ↔ down[n-W].
 """
 
+import warnings
+
 import numpy as np
+from ...reverse_arcs import reverse_arcs
 from numba import cuda, njit
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -40,12 +43,20 @@ _DIR_UP    = 3
 # ── AVQ kernel ────────────────────────────────────────────────────────────────
 
 @cuda.jit
-def _scan_active_vertices(excess, avq, avq_size, N):
-    """Build the Active Vertex Queue: one thread per pixel node."""
+def _scan_active_vertices(excess, height_label, avq, avq_size, N):
+    """Build the Active Vertex Queue: one thread per pixel node.
+
+    A node at _INF_H cannot reach the SINK through the residual graph, so
+    _tiled_push_relabel finds no admissible neighbour and returns immediately.
+    Enqueuing it anyway means the queue never empties and the loop runs out
+    max_iter doing nothing — returning a cut extracted from an unfinished
+    preflow. Its excess is flow that belongs back at the SOURCE, which phase
+    two of push-relabel handles and the minimum cut does not depend on.
+    """
     n = cuda.grid(1)
     if n >= N:
         return
-    if excess[n] > np.float32(1e-7):
+    if excess[n] > np.float32(1e-7) and height_label[n] < _INF_H:
         pos = cuda.atomic.add(avq_size, 0, np.int32(1))
         avq[pos] = np.int32(n)
 
@@ -207,13 +218,17 @@ def _preflow_kernel(cap_src, cap_snk, res_snk, excess, N):
 # ── active-excess check ────────────────────────────────────────────────────────
 
 @cuda.jit
-def _reduce_active_excess(excess, result, N):
-    """Set result[0] = 1 if any inner node has excess > threshold, else 0."""
+def _reduce_active_excess(excess, height_label, result, N):
+    """Largest excess over the nodes that can still push (height < _INF_H).
+
+    Excess stranded at _INF_H is not pushable, so counting it here keeps the
+    loop alive for ever — the same reason _scan_active_vertices skips it.
+    """
     sh = cuda.shared.array(shape=(256,), dtype=np.float32)
     tid = cuda.threadIdx.x
     n   = cuda.grid(1)
     val = np.float32(0.0)
-    if n < N:
+    if n < N and height_label[n] < _INF_H:
         val = excess[n]
     sh[tid] = val
     cuda.syncthreads()
@@ -317,8 +332,9 @@ def push_relabel_gpu(cap_src, cap_snk, cap_right, cap_down,
     d_cap_snk   = cuda.to_device(cap_snk.astype(np.float32))
     res_right = cuda.to_device(cap_right.astype(np.float32))
     res_down  = cuda.to_device(cap_down.astype(np.float32))
-    res_left  = cuda.to_device(cap_right.astype(np.float32))   # reverse of right
-    res_up    = cuda.to_device(cap_down.astype(np.float32))    # reverse of down
+    _rev_left, _rev_up = reverse_arcs(cap_right, cap_down, H, W)
+    res_left  = cuda.to_device(_rev_left)
+    res_up    = cuda.to_device(_rev_up)
     res_snk   = cuda.to_device(np.zeros(int(N), np.float32))
     excess    = cuda.to_device(np.zeros(int(N) + 2, np.float32))
 
@@ -357,6 +373,7 @@ def push_relabel_gpu(cap_src, cap_snk, cap_right, cap_down,
     zero_avq  = np.zeros(1, np.int32)
     zero_exc  = np.zeros(1, np.float32)
 
+    converged = False
     for iteration in range(max_iter):
         # Reset AVQ size
         d_avq_size.copy_to_device(zero_avq)
@@ -364,11 +381,12 @@ def push_relabel_gpu(cap_src, cap_snk, cap_right, cap_down,
         # Build AVQ
         scan_grid = (int(N) + scan_block - 1) // scan_block
         _scan_active_vertices[scan_grid, scan_block](
-            excess, d_avq, d_avq_size, N)
+            excess, d_height, d_avq, d_avq_size, N)
         cuda.synchronize()
 
         avq_size = int(d_avq_size.copy_to_host()[0])
         if avq_size == 0:
+            converged = True
             break
 
         # Tiled push-relabel
@@ -382,9 +400,10 @@ def push_relabel_gpu(cap_src, cap_snk, cap_right, cap_down,
 
         # Check convergence
         d_max_exc.copy_to_device(zero_exc)
-        _reduce_active_excess[exc_grid, exc_block](excess, d_max_exc, N)
+        _reduce_active_excess[exc_grid, exc_block](excess, d_height, d_max_exc, N)
         cuda.synchronize()
         if float(d_max_exc.copy_to_host()[0]) <= 1e-7:
+            converged = True
             break
 
         # Periodic global relabeling (CPU BFS)
@@ -398,6 +417,13 @@ def push_relabel_gpu(cap_src, cap_snk, cap_right, cap_down,
                             h_res_snk, H, W, height_label)
             height_label[int(N)] = int(N) + 2
             d_height.copy_to_device(height_label)
+
+    if not converged:
+        # Exhausting the cap does not mean the preflow finished; the cut below
+        # is then not minimal. Say so rather than return a plausible mask.
+        warnings.warn(
+            f"push_relabel_gpu hit its {max_iter}-iteration cap at {W}x{H}; "
+            "the cut is not minimal.", RuntimeWarning, stacklevel=2)
 
     # Final global relabeling to extract the cut
     h_res_right = res_right.copy_to_host()

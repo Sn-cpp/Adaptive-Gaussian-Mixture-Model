@@ -1,4 +1,5 @@
 import numpy as np
+from ...reverse_arcs import reverse_arcs
 
 _INF_HEIGHT = np.int32(2_000_000)
 
@@ -257,8 +258,9 @@ def push_relabel(cap_src, cap_snk, cap_right, cap_down,
     res_snk   = cap_snk.copy()
     res_right = cap_right.copy()
     res_down  = cap_down.copy()
-    res_left  = cap_right.copy()   # reverse of right edges
-    res_up    = cap_down.copy()    # reverse of down edges
+    # res_left[n] is the arc n -> n-1 and pairs with cap_right[n-1]; copying
+    # cap_right across shifts every reverse arc one pixel. See reverse_arcs.
+    res_left, res_up = reverse_arcs(cap_right, cap_down, H, W)
 
     excess       = np.zeros(N + 2, dtype=np.float32)
     height_label = np.zeros(N + 2, dtype=np.int32)
