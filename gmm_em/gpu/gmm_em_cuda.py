@@ -4,6 +4,7 @@ from numba import cuda
 from gmm_em.gmm_em_common import GMM_EM_Base
 from gmm_em.cpu.gmm_em_numba import _cov_inv_det    # reuse CPU 3×3 inv/det
 
+from time import perf_counter
 
 class GMM_EM_CUDA(GMM_EM_Base):
     """Full-covariance K-component GMM — CUDA-accelerated E and scoring steps.
@@ -63,6 +64,8 @@ class GMM_EM_CUDA(GMM_EM_Base):
 
         # M-step accumulate: reset buffers then atomic-add per pixel
         k_grid = (self.K + self._BLOCK - 1) // self._BLOCK
+
+        # This line use grid=1
         _zero_stats_cuda[k_grid, self._BLOCK](
             self.d_sums, self.d_prods, self.d_counts, K)
         _accumulate_stats_cuda[self._grid, self._BLOCK](
@@ -70,6 +73,7 @@ class GMM_EM_CUDA(GMM_EM_Base):
             self.d_sums, self.d_prods, self.d_counts,
             H, W, K)
         cuda.synchronize()
+
 
         # M-step solve: tiny K-loop on CPU (K=5, negligible)
         h_sums   = self.d_sums.copy_to_host()
@@ -110,10 +114,10 @@ class GMM_EM_CUDA(GMM_EM_Base):
             self.cov_dets[ci] = det
             self.inv_covs[ci] = inv
 
-            # Push updated model back to device
-            self.d_model.copy_to_device(self.model)
-            self.d_inv_covs.copy_to_device(self.inv_covs)
-            self.d_cov_dets.copy_to_device(self.cov_dets)
+        # Push updated model back to device
+        self.d_model.copy_to_device(self.model)
+        self.d_inv_covs.copy_to_device(self.inv_covs)
+        self.d_cov_dets.copy_to_device(self.cov_dets)
 
     def _fit_kernel(self, frame, mask, is_fg):
         d_frame = frame if hasattr(frame, "copy_to_host") else cuda.to_device(frame)

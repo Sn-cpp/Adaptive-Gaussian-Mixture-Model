@@ -39,7 +39,7 @@ class GMM_EM_Base:
         """-log P(color | GMM) for every pixel → written into `out` (H,W) float32."""
 
         t0 = perf_counter()
-        self._neg_log_prob_kernel(self, frame, out)
+        self._neg_log_prob_kernel(frame, out)
         return perf_counter() - t0
 
     def _fit_kernel(self, frame, mask, is_fg):

@@ -1,5 +1,6 @@
 import numpy as np
 from numba import njit, prange
+from time import perf_counter
 
 _INF_HEIGHT = np.int32(2_000_000)
 
