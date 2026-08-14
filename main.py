@@ -35,7 +35,39 @@ def connect_foreground(mask: np.ndarray,
     filled = np.zeros_like(mask)
     cv2.fillPoly(filled, contours, 255)
 
-    return cv2.erode(filled, k_erode)
+    result = cv2.erode(filled, k_erode)
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(result, connectivity=8)
+    if n_labels <= 1:
+        return result
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+
+    lr_comp = np.where(labels == largest, np.uint8(255), np.uint8(0))
+
+    img = cv2.bitwise_not(lr_comp)
+
+    h, w = img.shape[:2]
+
+    # Mask size must be (h + 2, w + 2)
+    mask = np.zeros((h + 2, w + 2), np.uint8)
+
+    # Starting position
+    seed_point = (50, 50)
+    new_color = (0, 255, 0) # Green color in BGR
+
+    # Threshold bounds
+    lo_diff = (10, 10, 10)
+    up_diff = (10, 10, 10)
+
+    # Apply floodFill
+    cv2.floodFill(img, mask, seed_point, new_color, lo_diff, up_diff, flags=4 | cv2.FLOODFILL_FIXED_RANGE)
+
+    ret = cv2.bitwise_or(lr_comp, img)
+
+    ret = cv2.erode(ret, k_erode)
+    
+    return ret
+
 
 from numba import njit, prange
 
@@ -47,9 +79,9 @@ def foo(b_prob: np.ndarray, sobel_mask: np.ndarray):
 
     for i in prange(H):
         for j in range(W):
-            if sobel_mask[i, j] == 0:
+            if sobel_mask[i, j] < 10:
                 out[i, j] = 0
-            elif b_prob[i, j] > 0.4:
+            elif b_prob[i, j] > 0.2:
                 out[i, j] = 0
             else:
                 out[i, j] = 255
@@ -97,9 +129,13 @@ if __name__ == "__main__":
 
         motion_mask, bg_prob, _ = gmm.apply(frame_f32)
 
+        prob_u8 = (np.clip(bg_prob, 0.0, 1.0) * 255.0).astype(np.uint8)
+        heatmap = cv2.applyColorMap(prob_u8, cv2.COLORMAP_JET)
+        cv2.imshow("BG/FG Probabilities", heatmap)
+
         foo_res = foo(bg_prob, combined)
 
-        med_mask = cv2.medianBlur(foo_res, 3)
+        med_mask = cv2.medianBlur(foo_res, 5)
 
         clean_mask = connect_foreground(med_mask, k_close, k_dilate, k_erode)
 
@@ -117,10 +153,6 @@ if __name__ == "__main__":
         cv2.imshow("Final Composite", blur)
 
 
-        
-        # prob_u8 = (np.clip(bg_prob, 0.0, 1.0) * 255.0).astype(np.uint8)
-        # p4 = cv2.applyColorMap(prob_u8, cv2.COLORMAP_JET)
-        # cv2.imshow("BG/FG Probabilities", p4)
 
         # fg_mask   = connect_foreground(motion_mask, bg_prob, k_close, k_dilate, k_erode)
         # blurred   = cv2.GaussianBlur(frame, (15, 15), 5.0)

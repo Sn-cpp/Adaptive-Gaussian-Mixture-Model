@@ -76,6 +76,8 @@ class GMM_Mask_CUDA_v1(GMM_Mask_Base):
             self.d_modes, self.d_mask,
             self.d_alpha_map,   # passed for the base-alpha clamp only
         )
+
+        # Post pro
         return self.d_mask, self.d_bg_prob
 
     def _step_kernel(self, frame, to_host, args):
