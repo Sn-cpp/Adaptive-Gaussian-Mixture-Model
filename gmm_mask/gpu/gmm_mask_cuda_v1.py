@@ -1,0 +1,346 @@
+import numpy as np
+from numba import cuda, float32, int32, uint8
+
+from gmm_mask.gmm_mask_common import GMM_Mask_Base, kernel_args
+from settings import (
+    FLT_EPSILON,
+    MOG2_HISTORY,
+)
+
+TILE_X = 32
+TILE_Y = 8
+MAX_C  = 3
+
+# ── Adaptive-alpha constants (SuBSENSE-inspired) ──────────────────────────────
+_ALPHA_DECAY   = float32(0.98)   # FG pixel: alpha *= this  (slows absorption)
+_ALPHA_RESTORE = float32(1.02)   # BG pixel: alpha *= this  (restores toward base)
+
+# ── Neighbor-propagation constants (ViBe-inspired) ────────────────────────────
+# With probability 1/PHI a background pixel copies its best Gaussian into a
+# random 8-neighbor's lowest-weight slot.  PHI=16 matches ViBe's default.
+_PHI = int32(16)
+
+# 8-neighbor offsets stored as flat (dy, dx) pairs
+_NBR_DY = ( 0,  0, -1,  1, -1, -1,  1,  1)
+_NBR_DX = (-1,  1,  0,  0, -1,  1, -1,  1)
+
+
+class GMM_Mask_CUDA_v1(GMM_Mask_Base):
+    """GMM_Mask_CUDA with two enhancements:
+
+    1. Per-pixel adaptive alpha (SuBSENSE feedback):
+       Foreground pixels decay their per-pixel learning rate so stationary
+       subjects are absorbed far more slowly than with a global alpha.
+
+    2. Spatial Gaussian neighbour propagation (ViBe spatial coherence):
+       Background-classified pixels occasionally copy their best Gaussian
+       component into a random 8-neighbour, bridging MOG2 gaps that cause
+       the shattered mask appearance.
+    """
+
+    def __init__(self, height: int, width: int, *args, **kwargs):
+        super().__init__(height, width, *args, **kwargs)
+
+        # Per-pixel alpha map — initialised to the same warm-up value that
+        # GMM_Mask_Base.learning_rate() would return for frame 1.
+        base_alpha = np.float32(1.0 / min(2, MOG2_HISTORY))
+        self._alpha_map = np.full((height, width), base_alpha, dtype=np.float32)
+
+        self.d_means    = cuda.to_device(self.means)
+        self.d_vars     = cuda.to_device(self.vars)
+        self.d_weights  = cuda.to_device(self.weights)
+        self.d_modes    = cuda.to_device(self.modes)
+        self.d_mask     = cuda.to_device(self.mask)
+        self.d_bg_prob  = cuda.to_device(self.bg_prob)
+        self.d_alpha_map = cuda.to_device(self._alpha_map)
+
+        self.block = (TILE_X, TILE_Y)
+        self.grid  = (
+            int((self.W + TILE_X - 1) // TILE_X),
+            int((self.H + TILE_Y - 1) // TILE_Y),
+        )
+
+    # ── public API (mirrors GMM_Mask_CUDA) ────────────────────────────────────
+
+    def step_device(self, d_frame, args, stream=0):
+        """Enqueue both kernels; returns (d_mask, d_bg_prob) without sync."""
+        mog2_step_v1_kernel[self.grid, self.block, stream](
+            d_frame,
+            self.d_weights, self.d_means, self.d_vars,
+            self.d_modes, self.d_mask, self.d_bg_prob,
+            self.d_alpha_map,
+            *args,
+        )
+        propagate_kernel[self.grid, self.block, stream](
+            self.d_weights, self.d_means, self.d_vars,
+            self.d_modes, self.d_mask,
+            self.d_alpha_map,   # passed for the base-alpha clamp only
+        )
+        return self.d_mask, self.d_bg_prob
+
+    def _step_kernel(self, frame, to_host, args):
+        d_frame = cuda.to_device(frame)
+        self.step_device(d_frame, args)
+        cuda.synchronize()
+
+        if to_host:
+            self.d_mask.copy_to_host(self.mask)
+            self.d_bg_prob.copy_to_host(self.bg_prob)
+            return self.mask, self.bg_prob
+        else:
+            return self.d_mask, self.d_bg_prob
+
+    def sync_state(self):
+        self.d_weights.copy_to_host(self.weights)
+        self.d_means.copy_to_host(self.means)
+        self.d_vars.copy_to_host(self.vars)
+        self.d_modes.copy_to_host(self.modes)
+        self.d_alpha_map.copy_to_host(self._alpha_map)
+
+    def background_image(self):
+        self.sync_state()
+        return super().background_image()
+
+
+# ── Kernel 1: MOG2 step with per-pixel alpha ──────────────────────────────────
+
+@cuda.jit(device=True)
+def _detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
+    t_weight = float32(0.0)
+    for mode in range(nmodes):
+        num = float32(0.0)
+        den = float32(0.0)
+        for c in range(C):
+            num += frame[c, y, x] * means[mode, c, y, x]
+            den += means[mode, c, y, x] * means[mode, c, y, x]
+        if den == float32(0.0):
+            return False
+        if num <= den and num >= tau * den:
+            a = num / den
+            dist2a = float32(0.0)
+            for c in range(C):
+                dD = a * means[mode, c, y, x] - frame[c, y, x]
+                dist2a += dD * dD
+            if dist2a < Tb * vars_[mode, y, x] * a * a:
+                return True
+        t_weight += weights[mode, y, x]
+        if t_weight > TB:
+            return False
+    return False
+
+
+@cuda.jit
+def mog2_step_v1_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
+                         alpha_map,
+                         alpha_base, prune_base, Tb, Tg, TB,
+                         var_init, var_min, var_max,
+                         tau, shadow_val, detect_shadows):
+    """MOG2 step using a per-pixel learning rate from alpha_map.
+
+    alpha_map is read for this pixel's alpha; prune is recomputed from it.
+    After classification, alpha_map is updated:
+      - foreground pixel: alpha *= _ALPHA_DECAY   (slow down absorption)
+      - background pixel: alpha *= _ALPHA_RESTORE (restore toward base)
+    alpha is clamped to [alpha_base/8, alpha_base] so it never runs away.
+    """
+    x, y = cuda.grid(2)
+    H = frame.shape[1]
+    W = frame.shape[2]
+    if y >= H or x >= W:
+        return
+
+    K = weights.shape[0]
+    C = means.shape[1]
+
+    # ── per-pixel alpha ───────────────────────────────────────────────────────
+    alpha = alpha_map[y, x]
+    prune = float32(-alpha * float32(0.05))   # CT = 0.05, mirrors kernel_args
+    alpha1 = float32(1.0) - alpha
+
+    dData = cuda.local.array(MAX_C, float32)
+
+    background = False
+    fits_pdf   = False
+    nmodes     = int32(modes[y, x])
+    total_weight   = float32(0.0)
+    bg_weight_sum  = float32(0.0)
+
+    mode = 0
+    while mode < nmodes:
+        weight    = alpha1 * weights[mode, y, x] + prune
+        swap_count = 0
+
+        if not fits_pdf:
+            var   = vars_[mode, y, x]
+            dist2 = float32(0.0)
+            for c in range(C):
+                dd = means[mode, c, y, x] - frame[c, y, x]
+                dData[c] = dd
+                dist2 += dd * dd
+
+            if dist2 < Tb * var:
+                bg_weight_sum += weights[mode, y, x]
+                if total_weight < TB:
+                    background = True
+
+            if dist2 < Tg * var:
+                fits_pdf = True
+                weight  += alpha
+                k        = alpha / weight
+                for c in range(C):
+                    means[mode, c, y, x] -= k * dData[c]
+                varnew = var + k * (dist2 - var)
+                if varnew < var_min:
+                    varnew = var_min
+                if varnew > var_max:
+                    varnew = var_max
+                vars_[mode, y, x] = varnew
+
+                i = mode
+                while i > 0:
+                    if weight < weights[i - 1, y, x]:
+                        break
+                    swap_count += 1
+                    tw = weights[i, y, x];        weights[i, y, x]     = weights[i-1, y, x]; weights[i-1, y, x] = tw
+                    tv = vars_[i, y, x];          vars_[i, y, x]       = vars_[i-1, y, x];   vars_[i-1, y, x]   = tv
+                    for c in range(C):
+                        tm = means[i, c, y, x];   means[i, c, y, x]   = means[i-1, c, y, x]; means[i-1, c, y, x] = tm
+                    i -= 1
+
+        if weight < -prune:
+            weight  = float32(0.0)
+            nmodes -= 1
+
+        weights[mode - swap_count, y, x] = weight
+        total_weight += weight
+        mode += 1
+
+    # ── renormalise ───────────────────────────────────────────────────────────
+    inv_weight = float32(0.0)
+    if abs(total_weight) > FLT_EPSILON:
+        inv_weight = float32(1.0) / total_weight
+    for mode in range(nmodes):
+        weights[mode, y, x] *= inv_weight
+
+    bg_prob[y, x] = bg_weight_sum
+
+    # ── new component if no fit ───────────────────────────────────────────────
+    if not fits_pdf and alpha > float32(0.0):
+        if nmodes == K:
+            mode = K - 1
+        else:
+            mode   = nmodes
+            nmodes += 1
+
+        if nmodes == 1:
+            weights[mode, y, x] = float32(1.0)
+        else:
+            weights[mode, y, x] = alpha
+            for i in range(nmodes - 1):
+                weights[i, y, x] *= alpha1
+
+        for c in range(C):
+            means[mode, c, y, x] = frame[c, y, x]
+        vars_[mode, y, x] = var_init
+
+        i = nmodes - 1
+        while i > 0:
+            if alpha < weights[i - 1, y, x]:
+                break
+            tw = weights[i, y, x];      weights[i, y, x]   = weights[i-1, y, x]; weights[i-1, y, x] = tw
+            tv = vars_[i, y, x];        vars_[i, y, x]     = vars_[i-1, y, x];   vars_[i-1, y, x]   = tv
+            for c in range(C):
+                tm = means[i, c, y, x]; means[i, c, y, x] = means[i-1, c, y, x]; means[i-1, c, y, x] = tm
+            i -= 1
+
+    modes[y, x] = nmodes
+
+    # ── classify ──────────────────────────────────────────────────────────────
+    if background:
+        mask[y, x] = uint8(0)
+    elif detect_shadows and _detect_shadow(
+            frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
+        mask[y, x] = shadow_val
+    else:
+        mask[y, x] = uint8(255)
+
+    # ── update per-pixel alpha (SuBSENSE feedback) ────────────────────────────
+    alpha_lo = alpha_base * float32(0.125)   # floor: base/8
+    if background:
+        new_alpha = alpha * _ALPHA_RESTORE
+        if new_alpha > alpha_base:
+            new_alpha = alpha_base
+    else:
+        new_alpha = alpha * _ALPHA_DECAY
+        if new_alpha < alpha_lo:
+            new_alpha = alpha_lo
+    alpha_map[y, x] = new_alpha
+
+
+# ── Kernel 2: spatial Gaussian propagation ────────────────────────────────────
+
+@cuda.jit
+def propagate_kernel(weights, means, vars_, modes, mask, alpha_map):
+    """Copy the top Gaussian of each background pixel into a random neighbour.
+
+    Uses a deterministic per-pixel hash as the random source so the kernel is
+    reproducible and avoids cuRAND state overhead.  Every PHI-th background
+    pixel (selected by frame-counter-free hash) propagates; on average 1/PHI
+    of all background pixels update a neighbour per frame — matching ViBe's
+    default phi=16.
+
+    The target neighbour slot is always the lowest-weight (last) active
+    component, so the propagated component must earn its place in the
+    recipient's weight-sorted mixture before it dominates.
+    """
+    x, y = cuda.grid(2)
+    H = weights.shape[2]   # weights shape: (K, H, W)  — wait, (K, H, W) no
+    # weights is (K, H, W): first dim K, second H, third W
+    # Recover H, W from the weight array dims
+    H = weights.shape[1]
+    W = weights.shape[2]
+    if y >= H or x >= W:
+        return
+
+    # Only propagate from background pixels
+    if mask[y, x] != uint8(0):
+        return
+
+    # Cheap deterministic hash — selects ~1/PHI pixels per call
+    h = int32(y * 1000003 + x * 999983)
+    if (h & int32(0x7FFFFFFF)) % _PHI != int32(0):
+        return
+
+    # Pick a neighbour index from the same hash
+    nbr_idx = int32((h >> 4) & int32(7))   # 0..7
+    ny = y + _NBR_DY[nbr_idx]
+    nx = x + _NBR_DX[nbr_idx]
+    if ny < 0 or ny >= H or nx < 0 or nx >= W:
+        return
+
+    K  = weights.shape[0]
+    C  = means.shape[1]
+    nm = int32(modes[y, x])
+    if nm == int32(0):
+        return
+
+    # Source: component 0 (highest weight in the sorted mixture)
+    src_w = weights[0, y, x]
+    src_v = vars_[0, y, x]
+
+    nm_nbr = int32(modes[ny, nx])
+
+    if nm_nbr < K:
+        # Append at the end (lowest-weight slot) and let the next mog2_step
+        # insertion-sort it into its rightful place.
+        slot = nm_nbr
+        modes[ny, nx] = uint8(nm_nbr + 1)
+    else:
+        # Replace the lowest-weight existing component
+        slot = K - 1
+
+    # Write with a small seed weight so it doesn't immediately dominate
+    weights[slot, ny, nx] = src_w * float32(0.1)
+    vars_[slot, ny, nx]   = src_v
+    for c in range(C):
+        means[slot, c, ny, nx] = means[0, c, y, x]

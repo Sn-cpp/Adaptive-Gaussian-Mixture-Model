@@ -1,45 +1,134 @@
-from gmm_em import warmup_em_gmm_jit
 from gmm_mask import warmup_mask_gmm_jit
-from grabcut import warmup_grabcut_jit
-warmup_em_gmm_jit()
 warmup_mask_gmm_jit()
-warmup_grabcut_jit()
 
 import argparse
 import cv2
 import numpy as np
 
 from gmm_mask import GMM_Mask_Numba
-from grabcut import GrabCut_CUDA_v0, GrabCut_CUDA_v1, GrabCut_CUDA_v2
 
+_BG_PROB_THRESH = np.float32(0.65)
+
+
+def _ellipse(r: int):
+    s = r * 2 + 1
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (s, s))
+
+
+def make_morph_kernels(height: int, width: int):
+    short    = min(height, width)
+    close_r  = max(3, int(short * 0.019))
+    dilate_r = max(5, int(short * 0.042))
+    erode_r  = max(3, int(short * 0.027))
+    return _ellipse(close_r), _ellipse(dilate_r), _ellipse(erode_r)
+
+
+def connect_foreground(mask: np.ndarray,
+                       k_close, k_dilate, k_erode) -> np.ndarray:
+    expanded = cv2.dilate(mask, k_dilate)
+
+    closed = cv2.morphologyEx(expanded, cv2.MORPH_CLOSE, k_close)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return np.zeros_like(mask)
+    filled = np.zeros_like(mask)
+    cv2.fillPoly(filled, contours, 255)
+
+    return cv2.erode(filled, k_erode)
+
+from numba import njit, prange
+
+@njit(parallel=True, cache=True)
+def foo(b_prob: np.ndarray, sobel_mask: np.ndarray):
+    H, W = b_prob.shape
+
+    out = np.zeros_like(b_prob, dtype=np.uint8)
+
+    for i in prange(H):
+        for j in range(W):
+            if sobel_mask[i, j] == 0:
+                out[i, j] = 0
+            elif b_prob[i, j] > 0.4:
+                out[i, j] = 0
+            else:
+                out[i, j] = 255
+
+    return out
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_path', default='0')
     args = parser.parse_args()
 
-    input_path = 0 if args.input_path == '0' else args.input_pathq
-    cap = cv2.VideoCapture(0)
+    input_path = 0 if args.input_path == '0' else args.input_path
+    cap = cv2.VideoCapture(input_path)
 
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
-    gmm_mask = GMM_Mask_Numba(height, width)
-    grabcut  = GrabCut_CUDA_v2(height, width)
+    k_close, k_dilate, k_erode = make_morph_kernels(height, width)
+
+    gmm = GMM_Mask_Numba(height, width)
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        frame = np.ascontiguousarray(frame, dtype=np.float32)
+        frame_f32 = np.ascontiguousarray(frame, dtype=np.float32)
 
-        motion_mask, bg_prob, _ = gmm_mask.apply(frame, to_host=False)
-        mask, result, elapsed   = grabcut.apply(frame, bg_prob)
+        gray = cv2.cvtColor(frame_f32, cv2.COLOR_BGR2GRAY)
 
-        # cv2.imshow("GMM Mask",    motion_mask)
-        cv2.imshow("Final Mask",  mask)
-        cv2.imshow("Result",      result)
+        # Tính đạo hàm theo hướng X (cạnh đứng)
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+
+        # Tính đạo hàm theo hướng Y (cạnh ngang)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+
+        # Chuyển đổi về lại kiểu uint8 (0-255) để hiển thị
+        abs_sobel_x = cv2.convertScaleAbs(sobel_x)
+        abs_sobel_y = cv2.convertScaleAbs(sobel_y)
+
+        # Kết hợp cả hai hướng (độ lớn gradient)
+        combined = cv2.addWeighted(abs_sobel_x, 0.5, abs_sobel_y, 0.5, 0)
+
+        # cv2.imshow("Sobel", combined)
+
+        motion_mask, bg_prob, _ = gmm.apply(frame_f32)
+
+        foo_res = foo(bg_prob, combined)
+
+        med_mask = cv2.medianBlur(foo_res, 3)
+
+        clean_mask = connect_foreground(med_mask, k_close, k_dilate, k_erode)
+
+        cv2.imshow("Filtered Combined Mask", med_mask)
+        cv2.imshow("Post-processed Mask", clean_mask)
+
+        blur = cv2.GaussianBlur(frame, (15, 15), 5.0)
+
+        fg = np.zeros_like(frame, dtype=np.uint8)
+        
+        cv2.copyTo(frame, clean_mask, blur)
+        cv2.copyTo(frame, clean_mask, fg)
+
+        cv2.imshow("Foreground Cut", fg)
+        cv2.imshow("Final Composite", blur)
+
+
+        
+        # prob_u8 = (np.clip(bg_prob, 0.0, 1.0) * 255.0).astype(np.uint8)
+        # p4 = cv2.applyColorMap(prob_u8, cv2.COLORMAP_JET)
+        # cv2.imshow("BG/FG Probabilities", p4)
+
+        # fg_mask   = connect_foreground(motion_mask, bg_prob, k_close, k_dilate, k_erode)
+        # blurred   = cv2.GaussianBlur(frame, (15, 15), 5.0)
+        # composite = np.where(fg_mask[:, :, np.newaxis] > 0, frame, blurred)
+
+        # cv2.imshow("GMM Mask",     motion_mask)
+        # cv2.imshow("Connected FG", fg_mask)
+        # cv2.imshow("Composite",    composite.astype(np.uint8))
 
         key = cv2.waitKey(5)
         if key == ord('q') or key == 27:

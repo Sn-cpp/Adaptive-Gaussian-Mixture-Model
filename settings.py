@@ -16,7 +16,7 @@ COMP_GEN_THRESHOLD = np.float32(9.0)
 
 MOG2_COLOR = True
 MOG2_N_COMPONENTS = 5           # nmixtures
-MOG2_HISTORY = 500              # learning rate falls back to 1/history
+MOG2_HISTORY = 250              # learning rate falls back to 1/history
 
 MOG2_VAR_THRESHOLD = np.float32(16.0)       # Tb — background / foreground decision
 MOG2_VAR_THRESHOLD_GEN = np.float32(9.0)    # Tg — "does the pixel fit this mode" (Tb > Tg)
