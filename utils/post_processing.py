@@ -123,6 +123,17 @@ def mask_refiner(mask: np.ndarray, bg_prob: np.ndarray = None,
     if bg_prob is not None:
         foreground = np.where(bg_prob < MOG2_BG_PROB_THRESHOLD,
                               np.uint8(255), np.uint8(0))
+        # A subject is not most of the frame. After a global exposure change
+        # the *new* background mode starts at weight ~0 and needs ~350 frames
+        # at alpha=0.002 to reach 0.5, so the confidence threshold calls the
+        # whole frame foreground for seconds even though MOG2's own decision
+        # has already recovered (measured on TestStableBackground.mp4: the
+        # camera re-exposes when the subject enters, and without this the
+        # last 100 frames sat at 98.9% coverage). Same principle as the
+        # model-side valve in MOG2Base.protection_ran_away.
+        if np.count_nonzero(foreground[::4, ::4] == 255) > \
+                foreground[::4, ::4].size * 0.6:
+            foreground = np.where(mask == 255, np.uint8(255), np.uint8(0))
     else:
         foreground = np.where(mask == 255, np.uint8(255), np.uint8(0))
 
