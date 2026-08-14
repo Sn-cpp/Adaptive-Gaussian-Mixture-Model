@@ -34,6 +34,21 @@ MOG2_DETECT_SHADOWS = False
 
 FLT_EPSILON = np.float32(1.1920929e-07)
 
+# ------------------------------------------------------------------------------
+# Post-processing
+#
+# A pixel counts as background only if the background modes it matched carry at
+# least this much of the weight. MOG2's own rule is the degenerate case of this
+# one, `bg_prob > 0` — any match at all, however weak the mode. Requiring real
+# weight rejects matches against spurious low-weight modes.
+MOG2_BG_PROB_THRESHOLD = np.float32(0.5)
+
+# Morphological CLOSE applied to the binary mask before the hole fill, as a
+# fraction of frame height. Capped: a kernel wider than the gap between two
+# objects merges them into one blob, and F1 will not tell you.
+CLOSE_KSIZE_FRACTION = 0.0625
+CLOSE_KSIZE_MAX = 61
+
 # Background blur
 BLUR_KSIZE = 15
 BLUR_SIGMA = 5.0

@@ -2,8 +2,10 @@ import numpy as np
 from numba import cuda, float32, int32, uint8
 
 from gmm_mask.gmm_mask_common import GMM_Mask_Base, kernel_args
+from gmm_mask.gpu import post_kernels as pk
 from settings import (
     FLT_EPSILON,
+    MOG2_BG_PROB_THRESHOLD,
     MOG2_HISTORY,
 )
 
@@ -26,20 +28,42 @@ _NBR_DX = (-1,  1,  0,  0, -1,  1, -1,  1)
 
 
 class GMM_Mask_CUDA_v1(GMM_Mask_Base):
-    """GMM_Mask_CUDA with two enhancements:
+    """v1 — post-processing moved onto the GPU, plus two optional model extras.
 
-    1. Per-pixel adaptive alpha (SuBSENSE feedback):
-       Foreground pixels decay their per-pixel learning rate so stationary
-       subjects are absorbed far more slowly than with a global alpha.
+    **The v1 contribution is the post-processing chain.** v0 computes the mask
+    on the device and then hands it to OpenCV on the host: threshold, median,
+    fill. Every one of those but the fill is a per-pixel or small-stencil
+    operation with no reason to be on the CPU, and each one costs a full
+    round trip of the mask. v1 keeps the mask resident and runs
+    `threshold -> median5` as kernels, so exactly one H2D (the frame) and one
+    D2H (the refined mask) cross the bus per frame.
 
-    2. Spatial Gaussian neighbour propagation (ViBe spatial coherence):
-       Background-classified pixels occasionally copy their best Gaussian
-       component into a random 8-neighbour, bridging MOG2 gaps that cause
-       the shattered mask appearance.
+    `fill_holes` deliberately stays on the host — see `post_kernels`.
+
+    The two model extras below are **off by default**. They were written for
+    webcam footage and have never been scored on the car dataset; adaptive
+    alpha in particular slows absorption, which is what you want for a person
+    who sits still and precisely what you do not want behind a moving car.
+    Turn them on only with a number from `eval_highway.py` to justify it.
+
+    1. `adaptive_alpha` — per-pixel learning rate (SuBSENSE feedback).
+       Foreground pixels decay their alpha so stationary subjects are absorbed
+       far more slowly than with a global alpha.
+
+    2. `propagate` — spatial Gaussian neighbour propagation (ViBe coherence).
+       Background pixels occasionally copy their best Gaussian into a random
+       8-neighbour, bridging the gaps that shatter a mask.
     """
 
-    def __init__(self, height: int, width: int, *args, **kwargs):
+    def __init__(self, height: int, width: int, *args,
+                 adaptive_alpha: bool = False, propagate: bool = False,
+                 bg_prob_threshold: float = MOG2_BG_PROB_THRESHOLD,
+                 post: bool = True, **kwargs):
         super().__init__(height, width, *args, **kwargs)
+        self.adaptive_alpha = bool(adaptive_alpha)
+        self.propagate = bool(propagate)
+        self.post = bool(post)
+        self.bg_prob_threshold = np.float32(bg_prob_threshold)
 
         # Per-pixel alpha map — initialised to the same warm-up value that
         # GMM_Mask_Base.learning_rate() would return for frame 1.
@@ -54,6 +78,12 @@ class GMM_Mask_CUDA_v1(GMM_Mask_Base):
         self.d_bg_prob  = cuda.to_device(self.bg_prob)
         self.d_alpha_map = cuda.to_device(self._alpha_map)
 
+        # Post-processing scratch. Allocated once: a per-frame allocation would
+        # cost more than the kernels it feeds.
+        self.refined = np.zeros((height, width), dtype=np.uint8)
+        self.d_post_a = cuda.device_array((height, width), dtype=np.uint8)
+        self.d_post_b = cuda.device_array((height, width), dtype=np.uint8)
+
         self.block = (TILE_X, TILE_Y)
         self.grid  = (
             int((self.W + TILE_X - 1) // TILE_X),
@@ -63,32 +93,55 @@ class GMM_Mask_CUDA_v1(GMM_Mask_Base):
     # ── public API (mirrors GMM_Mask_CUDA) ────────────────────────────────────
 
     def step_device(self, d_frame, args, stream=0):
-        """Enqueue both kernels; returns (d_mask, d_bg_prob) without sync."""
+        """Enqueue the model kernel and the post chain; no synchronisation.
+
+        Returns (d_refined, d_bg_prob) when post-processing is on, so callers
+        get the mask they should actually composite with. `d_mask` still holds
+        MOG2's own binary decision for anyone comparing against OpenCV.
+        """
         mog2_step_v1_kernel[self.grid, self.block, stream](
             d_frame,
             self.d_weights, self.d_means, self.d_vars,
             self.d_modes, self.d_mask, self.d_bg_prob,
             self.d_alpha_map,
+            self.adaptive_alpha,
             *args,
         )
-        propagate_kernel[self.grid, self.block, stream](
-            self.d_weights, self.d_means, self.d_vars,
-            self.d_modes, self.d_mask,
-            self.d_alpha_map,   # passed for the base-alpha clamp only
-        )
-        return self.d_mask, self.d_bg_prob
+        if self.propagate:
+            propagate_kernel[self.grid, self.block, stream](
+                self.d_weights, self.d_means, self.d_vars,
+                self.d_modes, self.d_mask,
+                self.d_alpha_map,   # passed for the base-alpha clamp only
+            )
+        if not self.post:
+            return self.d_mask, self.d_bg_prob
+
+        pk.threshold_kernel[self.grid, self.block, stream](
+            self.d_bg_prob, self.d_post_a, self.bg_prob_threshold)
+        pk.median5_kernel[self.grid, self.block, stream](
+            self.d_post_a, self.d_post_b)
+        return self.d_post_b, self.d_bg_prob
 
     def _step_kernel(self, frame, to_host, args):
         d_frame = cuda.to_device(frame)
-        self.step_device(d_frame, args)
+        d_out, _ = self.step_device(d_frame, args)
         cuda.synchronize()
 
-        if to_host:
-            self.d_mask.copy_to_host(self.mask)
-            self.d_bg_prob.copy_to_host(self.bg_prob)
-            return self.mask, self.bg_prob
-        else:
-            return self.d_mask, self.d_bg_prob
+        if not to_host:
+            return d_out, self.d_bg_prob
+
+        # One D2H for the mask the caller will composite with. bg_prob is not
+        # copied when post-processing is on: the GPU already thresholded it, so
+        # the transfer is pure waste — 8 MB a frame at 1080p, a third of the
+        # frame budget. Return None rather than the stale buffer, because a
+        # caller reading a silently-zero confidence map gets a mask that is
+        # entirely foreground and no error to explain it.
+        if self.post:
+            d_out.copy_to_host(self.refined)
+            return self.refined, None
+        self.d_mask.copy_to_host(self.mask)
+        self.d_bg_prob.copy_to_host(self.bg_prob)
+        return self.mask, self.bg_prob
 
     def sync_state(self):
         self.d_weights.copy_to_host(self.weights)
@@ -131,17 +184,21 @@ def _detect_shadow(frame, y, x, C, nmodes, weights, means, vars_, Tb, TB, tau):
 
 @cuda.jit
 def mog2_step_v1_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
-                         alpha_map,
+                         alpha_map, adaptive_alpha,
                          alpha_base, prune_base, Tb, Tg, TB,
                          var_init, var_min, var_max,
                          tau, shadow_val, detect_shadows):
-    """MOG2 step using a per-pixel learning rate from alpha_map.
+    """MOG2 step, optionally using a per-pixel learning rate from alpha_map.
 
-    alpha_map is read for this pixel's alpha; prune is recomputed from it.
-    After classification, alpha_map is updated:
+    With `adaptive_alpha` off this is the plain MOG2 update and is bit-exact
+    with `GMM_Mask_CUDA` — the flag has to leave that path untouched, or the
+    parity claim against OpenCV goes with it.
+
+    With it on, alpha_map supplies this pixel's alpha and prune is recomputed
+    from it. After classification alpha_map is updated:
       - foreground pixel: alpha *= _ALPHA_DECAY   (slow down absorption)
       - background pixel: alpha *= _ALPHA_RESTORE (restore toward base)
-    alpha is clamped to [alpha_base/8, alpha_base] so it never runs away.
+    clamped to [alpha_base/8, alpha_base] so it never runs away.
     """
     x, y = cuda.grid(2)
     H = frame.shape[1]
@@ -153,8 +210,12 @@ def mog2_step_v1_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
     C = means.shape[1]
 
     # ── per-pixel alpha ───────────────────────────────────────────────────────
-    alpha = alpha_map[y, x]
-    prune = float32(-alpha * float32(0.05))   # CT = 0.05, mirrors kernel_args
+    if adaptive_alpha:
+        alpha = alpha_map[y, x]
+        prune = float32(-alpha * float32(0.05))   # CT = 0.05, mirrors kernel_args
+    else:
+        alpha = alpha_base
+        prune = prune_base
     alpha1 = float32(1.0) - alpha
 
     dData = cuda.local.array(MAX_C, float32)
@@ -265,16 +326,17 @@ def mog2_step_v1_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
         mask[y, x] = uint8(255)
 
     # ── update per-pixel alpha (SuBSENSE feedback) ────────────────────────────
-    alpha_lo = alpha_base * float32(0.125)   # floor: base/8
-    if background:
-        new_alpha = alpha * _ALPHA_RESTORE
-        if new_alpha > alpha_base:
-            new_alpha = alpha_base
-    else:
-        new_alpha = alpha * _ALPHA_DECAY
-        if new_alpha < alpha_lo:
-            new_alpha = alpha_lo
-    alpha_map[y, x] = new_alpha
+    if adaptive_alpha:
+        alpha_lo = alpha_base * float32(0.125)   # floor: base/8
+        if background:
+            new_alpha = alpha * _ALPHA_RESTORE
+            if new_alpha > alpha_base:
+                new_alpha = alpha_base
+        else:
+            new_alpha = alpha * _ALPHA_DECAY
+            if new_alpha < alpha_lo:
+                new_alpha = alpha_lo
+        alpha_map[y, x] = new_alpha
 
 
 # ── Kernel 2: spatial Gaussian propagation ────────────────────────────────────
