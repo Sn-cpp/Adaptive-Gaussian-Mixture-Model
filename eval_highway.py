@@ -71,6 +71,31 @@ def connect_foreground(mask, k_close, k_dilate, k_erode):
     return cv2.erode(filled, k_erode)
 
 
+def connect_foreground_v2(mask, k_close, k_dilate, k_erode, seed=(50, 50)):
+    """Tin's `1fe1c5e` version: contour fill, then keep only the largest blob
+    and fill its holes, then shrink again.
+
+    The hole fill is `bitwise_not` -> `floodFill` from a seed -> `bitwise_or`.
+    Seed is a fixed pixel in his code; kept as a parameter here so the failure
+    mode is measurable rather than argued about — if the seed lands *inside*
+    the object it is already black, filling black with black does nothing, the
+    outer background survives the OR, and the mask explodes to almost the whole
+    frame.
+    """
+    result = connect_foreground(mask, k_close, k_dilate, k_erode)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(result, connectivity=8)
+    if n <= 1:
+        return result
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    lr = np.where(labels == largest, np.uint8(255), np.uint8(0))
+
+    inv = cv2.bitwise_not(lr)
+    h, w = inv.shape[:2]
+    cv2.floodFill(inv, np.zeros((h + 2, w + 2), np.uint8), seed, 0,
+                  (10,) * 3, (10,) * 3, flags=4 | cv2.FLOODFILL_FIXED_RANGE)
+    return cv2.erode(cv2.bitwise_or(lr, inv), k_erode)
+
+
 def build_chains(h, w):
     """name -> fn(mask, bg_prob, sobel) -> uint8 mask in {0, 255}."""
     short = min(h, w)
@@ -84,6 +109,10 @@ def build_chains(h, w):
 
     def gate(bp, sob, t):
         return np.where((sob > 0) & (bp <= t), np.uint8(255), np.uint8(0))
+
+    def tin_gate(bp, sob):
+        """`1fe1c5e` exactly: an edge of real strength, and low confidence."""
+        return np.where((sob >= 10) & (bp <= 0.2), np.uint8(255), np.uint8(0))
 
     def prob(bp, t=MOG2_BG_PROB_THRESHOLD):
         return np.where(bp < t, np.uint8(255), np.uint8(0))
@@ -110,9 +139,17 @@ def build_chains(h, w):
             lambda m, bp, s: cv2.medianBlur(gate(bp, s, 0.4), 3),
         "sobel gate + median3 + fill":
             lambda m, bp, s: fill_holes(cv2.medianBlur(gate(bp, s, 0.4), 3)),
-        "Tin: sobel + median3 + contour":
+        "Tin dd40d92: gate.4 + med3 + contour":
             lambda m, bp, s: connect_foreground(
                 cv2.medianBlur(gate(bp, s, 0.4), 3), k_close, k_dilate, k_erode),
+        # 1fe1c5e tightened both gate thresholds and added largest-blob +
+        # hole fill. `tin_gate` is his exact rule: sobel >= 10 AND bg_prob <= 0.2.
+        "Tin 1fe1c5e: gate.2 + med5 + contour+fill":
+            lambda m, bp, s: connect_foreground_v2(
+                cv2.medianBlur(tin_gate(bp, s), 5), k_close, k_dilate, k_erode),
+        "Tin 1fe1c5e, no largest-blob step":
+            lambda m, bp, s: connect_foreground(
+                cv2.medianBlur(tin_gate(bp, s), 5), k_close, k_dilate, k_erode),
     }
 
 
