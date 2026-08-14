@@ -37,14 +37,14 @@ def connect_foreground(mask: np.ndarray,
 
     result = cv2.erode(filled, k_erode)
 
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(result, connectivity=8)
-    if n_labels <= 1:
-        return result
-    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    # n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(result, connectivity=8)
+    # if n_labels <= 1:
+    #     return result
+    # largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
 
-    lr_comp = np.where(labels == largest, np.uint8(255), np.uint8(0))
+    # lr_comp = np.where(labels == largest, np.uint8(255), np.uint8(0))
 
-    img = cv2.bitwise_not(lr_comp)
+    img = cv2.bitwise_not(result)
 
     h, w = img.shape[:2]
 
@@ -62,7 +62,7 @@ def connect_foreground(mask: np.ndarray,
     # Apply floodFill
     cv2.floodFill(img, mask, seed_point, new_color, lo_diff, up_diff, flags=4 | cv2.FLOODFILL_FIXED_RANGE)
 
-    ret = cv2.bitwise_or(lr_comp, img)
+    ret = cv2.bitwise_or(result, img)
 
     ret = cv2.erode(ret, k_erode)
     
