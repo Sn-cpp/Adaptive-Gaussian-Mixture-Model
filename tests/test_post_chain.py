@@ -205,6 +205,16 @@ def test_every_kernel_actually_compiles_on_real_hardware():
     pk.warmup()          # threshold, median naive, median tiled, dilate, erode
     bk.warmup()          # blur naive, blur tiled, composite, colour conversion
 
+    # The compile check is `warmup()` itself: a kernel that cannot be lowered
+    # raises TypingError from the launch above, which is precisely how the
+    # shared-array bug surfaced. The loop below is a second, weaker guard that
+    # warmup() actually launches every kernel it claims to — a kernel silently
+    # dropped from warmup() would go back to being unverified.
+    #
+    # `overloads` is the attribute across numba versions; older ones also had
+    # `definitions`, and 0.60's CUDADispatcher has only `overloads`. Probe
+    # rather than assume, so this test does not itself become the thing that
+    # breaks on a different numba.
     for mod, names in ((pk, ["threshold_kernel", "median5_kernel",
                              "median5_tiled_kernel", "dilate_kernel",
                              "erode_kernel"]),
@@ -214,5 +224,10 @@ def test_every_kernel_actually_compiles_on_real_hardware():
                              "bgr2ycrcb_planar_kernel"])):
         for name in names:
             k = getattr(mod, name)
-            assert k.definitions or k.overloads, \
+            compiled = getattr(k, "overloads", None)
+            if compiled is None:
+                compiled = getattr(k, "definitions", None)
+            if compiled is None:
+                continue          # this numba exposes neither; warmup() is the test
+            assert len(compiled) > 0, \
                 f"{name} never compiled — warmup() does not launch it"
