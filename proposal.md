@@ -51,7 +51,7 @@ At Full HD (1920×1080) each frame holds about 2 million pixels. A Gaussian Mixt
 2. **Post-processing:** thresholding is per-pixel; the median filter is a 5×5 stencil with regular access, ideal for shared-memory tiling.
 3. **Gaussian blur:** a separable 2D stencil, the textbook tiling case.
 
-Two kernel launches for the model and the mask, one for the blur, all with near-full occupancy on a T4 (2560 CUDA cores).
+Two kernel launches for the model and the mask, and two for the blur — separable, so the horizontal and vertical passes cannot be fused without a grid-wide barrier. All with near-full occupancy on a T4 (2560 CUDA cores).
 
 ---
 
@@ -92,15 +92,18 @@ for each pixel p:
 **Pipeline architecture:**
 
 ```
-video frame (BGR)
-    ↓  colour convert (YCrCb) + planar layout
+video frame (BGR uint8)
+    ↓  H2D: three bytes per pixel — the only thing that goes up
+[Kernel 0] BGR→YCrCb + planar layout         ← per-pixel, bit-exact with cv2.cvtColor
 [Kernel 1] MOG2 update  → mask, bg_prob      ← per-pixel, no dependencies
 [Kernel 2] threshold    → binary mask        ← per-pixel  (fused into K1 in v2)
 [Kernel 3] median 5×5   → refined mask       ← 5×5 stencil, shared-memory tiled
     ↓  D2H: one byte per pixel
 [Host]     flood fill   → filled mask        ← inherently sequential, see §3
-[Kernel 4] separable Gaussian blur ⨝ composite
-    ↓
+    ↑  H2D: one byte per pixel
+[Kernel 4] separable Gaussian blur, horizontal   ← 15-tap, Q8 fixed point
+[Kernel 5] vertical pass ⨝ composite         ← the select is free here
+    ↓  D2H: three bytes per pixel
 display / write
 ```
 
@@ -154,7 +157,7 @@ display / write
 
 - Three implementations: sequential Python → Numba CPU → CUDA, all producing identical masks
 - **Kernel 1** MOG2 update, one thread per pixel, planar coalesced state
-- **Kernel 2** separable Gaussian blur fused with the composite, shared-memory tiled
+- **Kernel 2** separable Gaussian blur fused with the composite, shared-memory tiled, in Q8 fixed point so it is bit-exact with `cv2.GaussianBlur` rather than approximately Gaussian
 - Benchmarks at 480p / 720p / 1080p
 - **Performance target:** >30 FPS at 1080p on a T4, >20× over sequential Python
 - Composite output: sharp vehicles, blurred road
@@ -168,9 +171,19 @@ display / write
 
 | Version | What runs where | Why |
 |---|---|---|
-| **v0** | mask on GPU; threshold, median, fill on host (OpenCV) | baseline; copies 4 bytes/pixel back |
-| **v1** | threshold + median as CUDA kernels; fill on host | mask stays resident, 1 byte/pixel returns |
-| **v2** | threshold **fused** into the model kernel's epilogue; median shared-memory tiled | two kernels instead of three; each pixel read once per block instead of 25 times |
+| **v0** | mask on GPU; colour convert, threshold, median, fill, blur, composite on host | baseline; uploads 12 bytes/pixel and copies 5 back |
+| **v1** | colour convert, threshold, median, blur and composite as CUDA kernels; fill on host | only the frame goes up (3 bytes/pixel) and only the composite comes back |
+| **v2** | threshold **fused** into the model kernel's epilogue; median and blur shared-memory tiled | fewer launches; each pixel read once per block instead of 25 (median) or 15 (blur) times |
+
+  Measured bus traffic per frame at 1080p, computed by `bench_post.py` from the array shapes
+  rather than quoted: **35.25 MB → 16.59 MB, a 2.12× reduction.**
+
+  Measured on a Colab T4 (full numbers in `RESULTS-T4.md`): frame ingest **14.75 ms → 1.54 ms**
+  and blur+composite **13.35 ms → 1.49 ms** at 1080p, about **25 ms/frame** in total. Two thirds
+  of the ingest saving is host work deleted rather than kernel speed — the conversion kernel
+  itself costs 0.151 ms. We also recorded a prediction that turned out wrong: shared-memory
+  tiling was expected to barely beat the naive blur because L2 should already serve the row
+  reuse, and it wins **2.37×**, identically at 480p, 720p and 1080p.
 
   The median is worth a note: on a binary mask a median **is a majority vote**, so the kernel counts instead of sorting, and is bit-exact with `cv2.medianBlur` rather than an approximation of it. The threshold fuses because it reads and writes one pixel; the median does not, because it needs its neighbours' post-threshold values and CUDA has no grid-wide barrier — fusing it would be a race that mostly does not show up in testing.
 
@@ -185,7 +198,19 @@ Two harnesses, both in the repository and both runnable by a marker:
 - `eval_highway.py` — F1, IoU, precision, recall and empty-frame count for every candidate mask chain, on frames 470–1700 with the CDnet protocol.
 - `bench_post.py` — per-stage timing for v0/v1/v2 at each resolution, with interleaved repeats, and an equality check asserting that v1 and v2 produce the *same* mask as v0. A speedup that changes the output is not a speedup.
 
-Correctness is layered: the CUDA kernels are checked against the host chain pixel-for-pixel (`tests/test_post_chain.py`, runs under CUDASIM without a GPU), the host chain is scored against CDnet ground truth, and the MOG2 model with post-processing disabled is checked bit-for-bit against OpenCV.
+- `eval_highway.py --model X --parity-vs Y` — per-frame `np.array_equal` between two backends over the whole scored window. This is the equivalence gate, and an unchanged F1 is deliberately *not* accepted as one: F1 is a four-decimal summary of two million pixels and a mask can move by hundreds of them without shifting it.
+
+Correctness is layered, and each layer is a file a marker can run:
+
+- `tests/test_parity.py` — sequential Python == Numba == v0 == v1 == v2, mask and model state; and agreement with `cv2.createBackgroundSubtractorMOG2`.
+- `tests/test_blur.py` — the Q8 blur, the colour conversion, the borders and the composite, each against OpenCV with **zero tolerance**; plus the device ingest against the host ingest end to end.
+- `tests/test_post_chain.py` — the threshold and median kernels against the host chain.
+
+All three run without a GPU under `NUMBA_ENABLE_CUDASIM=1`.
+
+**Measured agreement with OpenCV's own MOG2:** bit-identical on synthetic sequences (0 of 30 720 pixels over 20 frames; 0 of 92 160 under heavy noise; 0 of 204 800 at 64×80), and 22 pixels of 1 536 000 — 0.0014%, all in a single frame — on real video. The residue is the float32 boundary: OpenCV accumulates in a different order and contracts its own FMAs, so a pixel within an ulp of `Tb·σ²` falls on either side of the comparison. Synthetic frames put almost nothing that close to the threshold; camera noise does. We report both numbers rather than the flattering one.
+
+The blur is a stronger claim than the model, and worth separating: it is integer arithmetic end to end, so its equality with `cv2.GaussianBlur` holds independently of GPU architecture and compiler flags, where the float32 MOG2 kernel's parity depends on how FMAs contract.
 
 ---
 

@@ -2,8 +2,11 @@ import numpy as np
 from numba import cuda, float32, int32, uint8
 
 from gmm_mask.gmm_mask_common import GMM_Mask_Base, kernel_args
+from gmm_mask.gpu import blur_kernels as bk
 from gmm_mask.gpu import post_kernels as pk
 from settings import (
+    BLUR_KSIZE,
+    BLUR_SIGMA,
     FLT_EPSILON,
     MOG2_BG_PROB_THRESHOLD,
     MOG2_HISTORY,
@@ -58,11 +61,12 @@ class GMM_Mask_CUDA_v1(GMM_Mask_Base):
     def __init__(self, height: int, width: int, *args,
                  adaptive_alpha: bool = False, propagate: bool = False,
                  bg_prob_threshold: float = MOG2_BG_PROB_THRESHOLD,
-                 post: bool = True, **kwargs):
+                 post: bool = True, colorspace: str = "ycrcb", **kwargs):
         super().__init__(height, width, *args, **kwargs)
         self.adaptive_alpha = bool(adaptive_alpha)
         self.propagate = bool(propagate)
         self.post = bool(post)
+        self.to_ycrcb = (colorspace == "ycrcb")
         self.bg_prob_threshold = np.float32(bg_prob_threshold)
 
         # Per-pixel alpha map — initialised to the same warm-up value that
@@ -89,6 +93,27 @@ class GMM_Mask_CUDA_v1(GMM_Mask_Base):
             int((self.W + TILE_X - 1) // TILE_X),
             int((self.H + TILE_Y - 1) // TILE_Y),
         )
+
+        # ── Kernel 2 buffers: the BGR frame is the only thing crossing the bus
+        # Allocated once. The blur has its own launch geometry and must never
+        # borrow `self.grid`/`self.block`: a radius-7 halo is 14 rows, so the
+        # model's 32x8 block would leave half of every shared tile unloaded,
+        # and the failure is silent — a plausible-looking but wrong blur.
+        self.d_frame_bgr = cuda.device_array((height, width, 3), np.uint8)
+        self.d_ycrcb     = cuda.device_array((3, height, width), np.float32)
+        self.d_blur_tmp  = cuda.device_array((height, width, 3), np.uint16)
+        self.d_out_bgr   = cuda.device_array((height, width, 3), np.uint8)
+        self.out_bgr     = np.empty((height, width, 3), dtype=np.uint8)
+        self.d_kq        = cuda.to_device(
+            bk.gaussian_kernel_q8(BLUR_KSIZE, BLUR_SIGMA))
+        self.blur_block  = (bk.BLUR_TILE_X, bk.BLUR_TILE_Y)
+        self.blur_grid   = bk.blur_grid_for(height, width)
+
+        # Whatever `step_device` last returned — d_post_b with post on, d_mask
+        # with it off. `composite()` reads this rather than naming a buffer,
+        # because naming one is how `--no-fill` ends up compositing against
+        # MOG2's raw decision instead of the refined mask.
+        self._d_mask_out = None
 
     # ── public API (mirrors GMM_Mask_CUDA) ────────────────────────────────────
 
@@ -142,6 +167,75 @@ class GMM_Mask_CUDA_v1(GMM_Mask_Base):
         self.d_mask.copy_to_host(self.mask)
         self.d_bg_prob.copy_to_host(self.bg_prob)
         return self.mask, self.bg_prob
+
+    # ── Kernel 2: BGR in, composite out, one conversion on the device ────────
+
+    def mask_from_bgr(self, frame_bgr, update_alpha=-1.0, to_host=True):
+        """Upload a BGR uint8 frame and return the refined mask.
+
+        This is the ingest half of the pipeline `main.py` uses. It replaces the
+        host's `cvtColor` + `astype(float32)` + transpose + 12 byte/pixel
+        upload with a 3 byte/pixel upload and a conversion kernel: 24.88 MB
+        becomes 6.22 MB per frame at 1080p, and a 25 MB numpy shuffle
+        disappears from the host entirely.
+
+        The conversion is bit-exact with `cv2.cvtColor`, so the model sees
+        byte-identical input to the old path and the scored mask is unchanged.
+        That is not an argument, it is a test — `test_blur.py` pins the kernel
+        against cv2 and `eval_highway.py --parity-vs` pins the resulting mask
+        across all 1231 scored frames.
+
+        `to_host=False` leaves the mask on the device and returns the device
+        array. That is the `--no-fill` path: the mask never has to come down
+        and go back up, saving both of its transfers.
+        """
+        self.d_frame_bgr.copy_to_device(np.ascontiguousarray(frame_bgr))
+        bk.bgr2ycrcb_planar_kernel[self.blur_grid, self.blur_block](
+            self.d_frame_bgr, self.d_ycrcb, self.to_ycrcb)
+
+        # next_args() advances nframes and the alpha ramp; calling it once per
+        # frame here is what keeps this path's learning rate identical to
+        # apply()'s. Calling it twice, or not at all, desynchronises the model
+        # from the reference without changing anything visible for many frames.
+        d_out, _ = self.step_device(self.d_ycrcb, self.next_args(update_alpha))
+        cuda.synchronize()
+        self._d_mask_out = d_out
+
+        if not to_host:
+            return d_out
+        d_out.copy_to_host(self.refined)
+        return self.refined
+
+    def _blur_kernels(self):
+        """v1 runs the naive pair. v2 overrides this with the tiled pair."""
+        return bk.blur_h_kernel, bk.blur_v_composite_kernel
+
+    def composite(self, filled_mask=None):
+        """Blur the background, keep the masked foreground, on the device.
+
+        `filled_mask=None` means the mask never left the device — composite
+        against whatever `mask_from_bgr` last produced. Otherwise the host
+        filled the holes and the mask has to go back up; that round trip is the
+        price of `fill_holes` staying sequential, and it is measured rather
+        than hidden (see `bench_post.py`).
+        """
+        if filled_mask is None:
+            if self._d_mask_out is None:
+                raise RuntimeError("composite() before mask_from_bgr()")
+            d_mask = self._d_mask_out
+        else:
+            self.d_post_a.copy_to_device(np.ascontiguousarray(filled_mask))
+            d_mask = self.d_post_a
+
+        kh, kv = self._blur_kernels()
+        kh[self.blur_grid, self.blur_block](
+            self.d_frame_bgr, self.d_blur_tmp, self.d_kq)
+        kv[self.blur_grid, self.blur_block](
+            self.d_blur_tmp, self.d_frame_bgr, d_mask, self.d_out_bgr,
+            self.d_kq)
+        cuda.synchronize()
+        self.d_out_bgr.copy_to_host(self.out_bgr)
+        return self.out_bgr
 
     def sync_state(self):
         self.d_weights.copy_to_host(self.weights)

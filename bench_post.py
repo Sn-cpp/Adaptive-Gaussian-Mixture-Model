@@ -1,35 +1,80 @@
-"""Per-stage timing for the three post-processing versions. Needs a real GPU.
+"""Per-stage timing for the GPU pipeline versions. Needs a real GPU.
 
     python bench_post.py --sizes 480 720 1080
+    python bench_post.py --sizes 480 --with-sequential   # the >20x baseline
 
-    v0  mask on the device, threshold + median + fill on the host with OpenCV
-    v1  threshold + median as CUDA kernels, fill on the host
-    v2  threshold fused into the model kernel's epilogue, median tiled
+    v0  mask on the device; threshold, median, fill, blur, composite on the host
+    v1  threshold + median + blur + composite as CUDA kernels; fill on the host
+    v2  threshold fused into the model kernel's epilogue; median and blur tiled
 
-The number that matters is not the kernel time — it is the mask round trip. v0
-copies the confidence map back (float32, 4 bytes a pixel) so the host can
-threshold it; v1 and v2 copy back one byte a pixel, already refined. At 1080p
-that is 8 MB against 2 MB per frame.
+The number that matters is not the kernel time — it is what crosses the bus. v0
+uploads a planar float32 frame (12 bytes a pixel) and copies the confidence map
+back (4 bytes a pixel) so the host can threshold it. v1 and v2 upload the BGR
+frame (3 bytes a pixel), convert colour on the device, and return one byte a
+pixel of mask plus the finished composite. At 1080p that is 26.96 MB against
+16.58 MB per frame, and the bytes column below is computed from the array
+shapes rather than quoted from this docstring.
 
-Timings are medians of interleaved repeats. Interleave if you re-measure: a
-single cold pass on a shared T4 has reported swings of 30% and more, which is
-larger than every effect this file is trying to measure.
+**Correctness is measured separately from speed, and first.** The previous
+version of this file interleaved them: it timed three models, then compared a
+single frame of output after 312 state updates. That misses a divergence that
+appears at frame 40 and heals by frame 312, and it reports a coincidence as a
+proof. Here every frame of every version is compared against the host chain,
+on models that are driven once, and only then does anything get timed.
+
+Timings are medians of interleaved repeats, each on a freshly built model so
+that no repeat measures a more converged mixture than the one before it.
+Interleave if you re-measure: a single cold pass on a shared T4 has reported
+swings of 30% and more, larger than every effect this file tries to measure.
 """
 import argparse
+import platform
+import sys
 import time
 
 import cv2
 import numpy as np
 
-from gmm_mask import GMM_Mask_CUDA, GMM_Mask_CUDA_v1, GMM_Mask_CUDA_v2
-from settings import MOG2_BG_PROB_THRESHOLD
-from utils.post_processing import fill_holes, refine_mask
+from gmm_mask import (GMM_Mask_CPU, GMM_Mask_CUDA, GMM_Mask_CUDA_v1,
+                      GMM_Mask_CUDA_v2)
+from settings import BLUR_KSIZE, BLUR_SIGMA
+from utils.post_processing import background_blur, fill_holes, refine_mask
 
 SIZES = {480: (854, 480), 720: (1280, 720), 1080: (1920, 1080)}
+ROUNDS = 5      # interleaved passes per version
+
+
+def environment():
+    """Every claim here is build-sensitive; record what produced it."""
+    import numba
+    rows = [("python", platform.python_version()), ("numpy", np.__version__),
+            ("opencv", cv2.__version__), ("numba", numba.__version__),
+            ("platform", platform.platform())]
+    try:
+        from numba import cuda
+        d = cuda.get_current_device()
+        # numba returns device.name as bytes on some versions and str on
+        # others (0.60 on Colab gives str, 0.61 locally gives bytes). Found by
+        # running this on the T4, which is the point of running it on the T4.
+        name = d.name.decode() if isinstance(d.name, bytes) else str(d.name)
+        rows.append(("gpu", f"{name} cc{d.compute_capability}"))
+        rows.append(("cuda driver", str(cuda.cudadrv.driver.driver.get_version())))
+    except Exception as e:                          # pragma: no cover
+        rows.append(("gpu", f"unavailable ({e})"))
+    print("environment")
+    for k, v in rows:
+        print(f"  {k:14s} {v}")
 
 
 def make_frames(n, size, seed=0):
-    """Synthetic traffic: a static textured road with blobs moving across it."""
+    """Synthetic traffic as a decoder would hand it over: uint8 BGR.
+
+    Not float32 planar. The old version handed the models a preprocessed array,
+    which quietly excluded the host's colour conversion and transpose from v0's
+    measurement — the exact cost v1 removes. Measuring the thing you optimised
+    away as if it were free makes the speedup look smaller and the reason for
+    it invisible.
+    """
     w, h = size
     rng = np.random.default_rng(seed)
     road = cv2.GaussianBlur(
@@ -43,73 +88,190 @@ def make_frames(n, size, seed=0):
             cv2.rectangle(f, (cx, cy), (cx + w // 12, cy + h // 14),
                           (200.0, 195.0, 205.0), -1)
         out.append(np.ascontiguousarray(
-            np.clip(f + rng.normal(0, 2.0, f.shape), 0, 255), dtype=np.float32))
+            np.clip(f + rng.normal(0, 2.0, f.shape), 0, 255), dtype=np.uint8))
     return out
 
 
-def timed(fn, frames, warm=8, repeats=3):
-    from numba import cuda
-    for f in frames[:warm]:
-        fn(f)
-    cuda.synchronize()
-    best = []
-    for _ in range(repeats):
-        t0 = time.perf_counter()
-        for f in frames[warm:]:
-            fn(f)
-        cuda.synchronize()
-        best.append((time.perf_counter() - t0) / len(frames[warm:]))
-    return np.median(best) * 1000
+# ── the three pipelines, each stated end to end from a BGR frame ─────────────
+
+def run_v0(model, frame_bgr):
+    """Host everything except the model kernel — the baseline being beaten."""
+    ycrcb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)
+    mask, bg_prob, _ = model.apply(np.ascontiguousarray(ycrcb, np.float32))
+    refined = refine_mask(np.asarray(mask), bg_prob=np.asarray(bg_prob))
+    return refined, background_blur(frame_bgr, refined, BLUR_KSIZE, BLUR_SIGMA)
 
 
-def bench(size, n=40):
+def run_gpu(model, frame_bgr):
+    """v1/v2 — only the flood fill happens on the host."""
+    refined = fill_holes(model.mask_from_bgr(frame_bgr))
+    return refined, model.composite(refined)
+
+
+PIPELINES = {
+    "v0 host post+blur": (GMM_Mask_CUDA, run_v0),
+    "v1 GPU post+blur": (GMM_Mask_CUDA_v1, run_gpu),
+    "v2 fused + tiled": (GMM_Mask_CUDA_v2, run_gpu),
+}
+
+
+def bytes_per_frame(h, w):
+    """Bus traffic derived from the array shapes, not from prose."""
+    px = h * w
+    v0 = px * 3 * 4 + px * 1 + px * 4          # planar f32 up, mask + bg_prob down
+    gpu = px * 3 + px * 1 + px * 1 + px * 3    # BGR up, mask down, mask up, composite down
+    return v0 / 1e6, gpu / 1e6
+
+
+# ── correctness, once, on models nothing has timed ───────────────────────────
+
+def check_equivalence(size, n=24):
     w, h = size
     frames = make_frames(n, size)
+    models = {k: cls(h, w) for k, (cls, _) in PIPELINES.items()}
+    runs = {k: fn for k, (_, fn) in PIPELINES.items()}
 
-    def v0(f):
-        mask, bg_prob, _ = m0.apply(f)
-        return refine_mask(np.asarray(mask), bg_prob=np.asarray(bg_prob))
+    bad_mask = {k: 0 for k in PIPELINES}
+    bad_comp = {k: 0 for k in PIPELINES}
+    ref_key = "v0 host post+blur"
+    saw_fg = False
 
-    def vgpu(model):
-        def run(f):
-            mask, _, _ = model.apply(f)
-            return fill_holes(np.asarray(mask))
-        return run
+    for f in frames:
+        outs = {k: runs[k](models[k], f) for k in PIPELINES}
+        ref_m, ref_c = outs[ref_key]
+        saw_fg |= bool((ref_m == 255).any())
+        for k in PIPELINES:
+            m, c = outs[k]
+            bad_mask[k] += int((m != ref_m).sum())
+            bad_comp[k] += int((c != ref_c).sum())
 
-    m0 = GMM_Mask_CUDA(h, w)
-    m1 = GMM_Mask_CUDA_v1(h, w)
-    m2 = GMM_Mask_CUDA_v2(h, w)
+    print(f"\nequivalence at {w}x{h} over {n} frames, vs the host chain")
+    ok = saw_fg
+    if not saw_fg:
+        print("  DEGENERATE: no foreground in any frame — this proves nothing")
+    for k in PIPELINES:
+        verdict = "identical" if not (bad_mask[k] or bad_comp[k]) else "DIVERGED"
+        ok &= not (bad_mask[k] or bad_comp[k])
+        print(f"  {k:20s} mask {bad_mask[k]:>10d} px   "
+              f"composite {bad_comp[k]:>10d} px   {verdict}")
+    if not ok:
+        print("  A speedup that changes the output is not a speedup.")
+    return ok
 
-    rows = []
-    # interleave so thermal drift and host contention hit all three equally
-    for _ in range(3):
-        rows.append(("v0 host post", timed(v0, frames)))
-        rows.append(("v1 GPU post", timed(vgpu(m1), frames)))
-        rows.append(("v2 fused + tiled", timed(vgpu(m2), frames)))
-    agg = {}
-    for name, ms in rows:
-        agg.setdefault(name, []).append(ms)
 
-    print(f"\n{w}x{h}, {n - 8} timed frames, median of interleaved repeats")
-    print(f"  {'version':20s} {'ms/frame':>9s} {'FPS':>7s} {'vs v0':>8s}")
-    base = np.median(agg["v0 host post"])
-    for name in ("v0 host post", "v1 GPU post", "v2 fused + tiled"):
-        ms = np.median(agg[name])
-        print(f"  {name:20s} {ms:9.2f} {1000 / ms:7.1f} {base / ms:7.2f}x")
+# ── timing ────────────────────────────────────────────────────────────────────
 
-    # equality is not optional: v1/v2 are speedups, not different algorithms
-    a = v0(frames[-1])
-    b = vgpu(m1)(frames[-1])
-    c = vgpu(m2)(frames[-1])
-    print(f"  masks identical: v0==v1 {np.array_equal(a, b)}, "
-          f"v1==v2 {np.array_equal(b, c)}")
+def one_pass(build, fn, frames, warm=8):
+    """One timed pass over the frames, on a model built for this pass alone.
+
+    Rebuilding matters. Replaying the same frames into one model makes the
+    second pass measure a converged mixture and the first a converging one —
+    genuinely different branch behaviour in the same kernel, reported as
+    run-to-run noise.
+
+    This returns a single measurement, not a median. The interleaving and the
+    median belong to the caller, because a median taken here would be a median
+    of consecutive runs and the whole point is that consecutive runs on a
+    shared T4 are correlated.
+    """
+    from numba import cuda
+    m = build()
+    for f in frames[:warm]:
+        fn(m, f)
+    cuda.synchronize()
+    t0 = time.perf_counter()
+    for f in frames[warm:]:
+        fn(m, f)
+    cuda.synchronize()
+    return (time.perf_counter() - t0) / len(frames[warm:]) * 1000
+
+
+def stage_breakdown(size, n=24):
+    """Where the frame actually goes, for v2. `proposal.md` promises this."""
+    from numba import cuda
+    w, h = size
+    frames = make_frames(n, size)
+    m = GMM_Mask_CUDA_v2(h, w)
+    for f in frames[:8]:
+        run_gpu(m, f)
+    cuda.synchronize()
+
+    acc = dict.fromkeys(("mask (H2D+kernels+D2H)", "host fill_holes",
+                         "composite (H2D+kernels+D2H)"), 0.0)
+    for f in frames[8:]:
+        t = time.perf_counter()
+        refined = m.mask_from_bgr(f)
+        acc["mask (H2D+kernels+D2H)"] += time.perf_counter() - t
+        t = time.perf_counter()
+        filled = fill_holes(refined)
+        acc["host fill_holes"] += time.perf_counter() - t
+        t = time.perf_counter()
+        m.composite(filled)
+        acc["composite (H2D+kernels+D2H)"] += time.perf_counter() - t
+
+    k = len(frames) - 8
+    total = sum(acc.values()) / k * 1000
+    print(f"\nper-stage, v2 at {w}x{h}")
+    for name, s in acc.items():
+        ms = s / k * 1000
+        print(f"  {name:32s} {ms:8.3f} ms  {ms / max(total, 1e-9):6.1%}")
+    print(f"  {'total':32s} {total:8.3f} ms")
+
+
+def bench(size, n=40, with_sequential=False):
+    w, h = size
+    frames = make_frames(n, size)
+    v0_mb, gpu_mb = bytes_per_frame(h, w)
+
+    # Genuinely interleaved: v0, v1, v2, v0, v1, v2, ... so thermal drift and
+    # host contention land on all three equally. The reported figure is the
+    # median of all ROUNDS passes, not a median of per-version medians — that
+    # would average away the very correlation the interleaving exists to break.
+    rows = {name: [] for name in PIPELINES}
+    for _ in range(ROUNDS):
+        for name, (cls, fn) in PIPELINES.items():
+            rows[name].append(one_pass(lambda c=cls: c(h, w), fn, frames))
+
+    print(f"\n{w}x{h}, {n - 8} timed frames, median of {ROUNDS} interleaved passes")
+    print(f"  {'version':20s} {'ms/frame':>9s} {'FPS':>7s} {'vs v0':>8s} "
+          f"{'MB/frame':>9s}")
+    base = np.median(rows["v0 host post+blur"])
+    for name in PIPELINES:
+        ms = np.median(rows[name])
+        mb = v0_mb if name.startswith("v0") else gpu_mb
+        print(f"  {name:20s} {ms:9.2f} {1000 / ms:7.1f} {base / ms:7.2f}x "
+              f"{mb:9.2f}")
+
+    if with_sequential:
+        # The 100% target is ">20x over sequential Python". GMM_Mask_CPU is a
+        # per-pixel Python loop, so this is minutes per frame at 1080p — run it
+        # at 480p and say so rather than quoting an extrapolation as a measurement.
+        seq = GMM_Mask_CPU(h, w)
+        t = time.perf_counter()
+        for f in frames[:2]:
+            run_v0(seq, f)
+        seq_ms = (time.perf_counter() - t) / 2 * 1000
+        best = min(float(np.median(rows[k])) for k in PIPELINES)
+        print(f"  {'sequential Python':20s} {seq_ms:9.2f} {1000 / seq_ms:7.1f} "
+              f"{'-':>7s}  (2 frames only)")
+        print(f"  -> best GPU version is {seq_ms / best:.1f}x sequential "
+              f"at {w}x{h}")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--sizes", nargs="+", type=int, default=[480, 720, 1080])
+    ap.add_argument("--with-sequential", action="store_true",
+                    help="add the pure-Python baseline (slow; use at 480p)")
+    ap.add_argument("--skip-equivalence", action="store_true")
     args = ap.parse_args()
     if GMM_Mask_CUDA is None:
         raise SystemExit("no CUDA device — this benchmark needs a real GPU")
+
+    environment()
     for s in args.sizes:
-        bench(SIZES[s])
+        if not args.skip_equivalence and not check_equivalence(SIZES[s]):
+            raise SystemExit(
+                f"versions disagree at {s}p — timing them would be meaningless")
+        bench(SIZES[s], with_sequential=args.with_sequential)
+        stage_breakdown(SIZES[s])

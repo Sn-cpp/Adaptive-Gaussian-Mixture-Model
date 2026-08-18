@@ -6,6 +6,11 @@
 Defaults are the configuration `eval_highway.py` scored highest on CDnet
 `highway` (F1 0.9843): YCrCb model input, foreground where the background
 confidence is below 0.5, median 5, flood-fill the holes.
+
+`cuda_v1` and `cuda_v2` take a different route through this file: they convert
+colour, threshold, median-filter, blur and composite on the device, so the only
+host work left per frame is the flood fill. Everything else keeps the original
+host chain, which is the specification those kernels are tested against.
 """
 from gmm_mask import warmup_mask_gmm_jit
 warmup_mask_gmm_jit()
@@ -39,7 +44,9 @@ def main():
                     help="what the model sees; the composite is always BGR. "
                          "ycrcb is worth +16 F1 on highway (0.827 -> 0.984)")
     ap.add_argument("--no-fill", action="store_true",
-                    help="skip the hole fill (costs about 0.4 F1)")
+                    help="skip the hole fill (costs about 0.4 F1). On the GPU "
+                         "backends this also keeps the mask on the device, "
+                         "saving both of its transfers")
     ap.add_argument("--no-display", action="store_true",
                     help="for headless runs; still prints throughput")
     args = ap.parse_args()
@@ -59,7 +66,18 @@ def main():
 
     to_model = ((lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb))
                 if args.colorspace == "ycrcb" else (lambda f: f))
-    model = cls(height, width)
+    # v1/v2 do the colour conversion on the device, so they take the raw BGR
+    # frame and are told which space they are converting to. Everything else
+    # gets a converted frame from the host.
+    # Ask the class whether it takes `colorspace` rather than probing with
+    # try/except TypeError: that would also swallow a genuine TypeError raised
+    # from inside __init__ and quietly construct a model with the wrong
+    # colour space, which is exactly the kind of silent-wrong-number bug this
+    # pipeline is built to avoid.
+    import inspect
+    kw = ({"colorspace": args.colorspace}
+          if "colorspace" in inspect.signature(cls.__init__).parameters else {})
+    model = cls(height, width, **kw)
     # The CUDA v1/v2 classes run threshold+median on the device and hand back a
     # mask that only needs the flood fill; everything else returns MOG2's raw
     # mask plus the confidence map, and the host does the rest.
@@ -73,26 +91,33 @@ def main():
         ok, frame = cap.read()
         if not ok:
             break
-        planar_in = np.ascontiguousarray(to_model(frame), dtype=np.float32)
-
         t0 = time.perf_counter()
-        mask, bg_prob, _ = model.apply(planar_in)
         if gpu_post:
-            # threshold and median already ran on the device; only the fill left
-            refined = np.asarray(mask)
-            if not args.no_fill:
-                refined = fill_holes(refined)
+            # The whole frame stays on the device except for the flood fill:
+            # BGR up (3 bytes a pixel), mask down, filled mask back up, and the
+            # composite down. The fill is the one stage that is inherently
+            # sequential -- see utils/post_processing.fill_holes.
+            if args.no_fill:
+                model.mask_from_bgr(frame, to_host=False)
+                refined = None
+                result = model.composite()
+            else:
+                refined = fill_holes(model.mask_from_bgr(frame))
+                result = model.composite(refined)
         else:
+            planar_in = np.ascontiguousarray(to_model(frame), dtype=np.float32)
+            mask, bg_prob, _ = model.apply(planar_in)
             refined = refine_mask(np.asarray(mask), bg_prob=bg_prob,
                                   do_fill=not args.no_fill)
-        result = background_blur(frame, refined, BLUR_KSIZE, BLUR_SIGMA)
+            result = background_blur(frame, refined, BLUR_KSIZE, BLUR_SIGMA)
         total += time.perf_counter() - t0
         frames += 1
 
         if not args.no_display:
             cv2.putText(result, f"{frames / max(total, 1e-9):.1f} FPS",
                         (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-            cv2.imshow("mask", refined)
+            if refined is not None:
+                cv2.imshow("mask", refined)
             cv2.imshow("composite", result)
             if cv2.waitKey(1) in (ord("q"), 27):
                 break

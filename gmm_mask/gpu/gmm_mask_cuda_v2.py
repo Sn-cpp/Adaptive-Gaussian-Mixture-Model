@@ -22,6 +22,7 @@ loads per pixel into about 1.4.
 import numpy as np
 from numba import cuda, float32, int32, uint8
 
+from gmm_mask.gpu import blur_kernels as bk
 from gmm_mask.gpu import post_kernels as pk
 from gmm_mask.gpu.gmm_mask_cuda_v1 import (
     GMM_Mask_CUDA_v1, TILE_X, TILE_Y, MAX_C, _detect_shadow,
@@ -35,6 +36,16 @@ class GMM_Mask_CUDA_v2(GMM_Mask_CUDA_v1):
     Inherits v1's buffers and flags; only the enqueue order changes. The
     refined mask is verified against v1 pixel-for-pixel in `tests/`.
     """
+
+    def _blur_kernels(self):
+        """The tiled pair. Same output as v1's, each pixel read once per block.
+
+        Overriding one method is the whole difference, which is the point: if
+        the tiled kernels turn out to be no faster than the naive ones on a T4
+        — plausible, since L2 already serves row-strided reuse well — that is a
+        measurement to report, not a rewrite to undo.
+        """
+        return bk.blur_h_tiled_kernel, bk.blur_v_composite_tiled_kernel
 
     def step_device(self, d_frame, args, stream=0):
         if not self.post:
