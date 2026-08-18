@@ -4,3 +4,7 @@
 *__pycache__
 *.vscode/
 *.claude/
+.venv/
+*.zip
+highway/
+.pytest_cache/

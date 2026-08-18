@@ -51,6 +51,42 @@ class GMM_Mask_Base:
         self.alpha = self.learning_rate(update_alpha)
         return kernel_args(self.alpha, **self._params)
 
+    def background_image(self):
+        """The learned background as a BGR/YCrCb image, for the demo and report.
+
+        Three subclasses already override this to sync device state first and
+        then call `super()`, but no base implementation ever existed — every one
+        of those overrides raised `AttributeError` on the first call. Nothing in
+        the shipping pipeline calls it, which is why it went unnoticed; the
+        notebook wants the picture, so the base method is the smaller fix.
+
+        MOG2's background is not one Gaussian: it is the leading modes whose
+        cumulative weight passes `TB`. Averaging their means weighted by weight
+        is the same rule the mask uses, so the picture and the mask agree about
+        what "background" means. Pixels with no active mode yet (the first
+        frame) come back black rather than as a division by zero.
+        """
+        w = self.weights                       # (K, H, W), sorted descending
+        # The kernel tests `total_weight < TB` *before* adding the current
+        # mode's weight, so the reconstruction is the shifted cumulative sum,
+        # not `cumsum - w`. The two agree on every one of 200 000 random
+        # normalised weight vectors, but `(a + b) - b == a` is not an identity
+        # in float32 and the shifted form is what the kernel actually holds in
+        # its accumulator. Free to get right, so get it right.
+        cum = np.cumsum(w, axis=0)
+        before = np.concatenate(
+            [np.zeros_like(w[:1]), cum[:-1]], axis=0)
+        is_bg = before < np.float32(self._params["background_ratio"])
+        is_bg &= np.arange(self.K)[:, None, None] < self.modes[None]
+
+        wm = np.where(is_bg, w, np.float32(0.0))          # (K, H, W)
+        denom = wm.sum(axis=0)                            # (H, W)
+        acc = (wm[:, None] * self.means).sum(axis=0)      # (C, H, W)
+        out = np.divide(acc, denom, out=np.zeros_like(acc), where=denom > 0)
+        # Round, do not truncate: OpenCV's getBackgroundImage rounds, and a
+        # learned mean of 0.51 is a 1, not a 0.
+        return np.clip(np.rint(out), 0, 255).astype(np.uint8).transpose(1, 2, 0)
+
     def learning_rate(self, rate=-1.0):
         """OpenCV semantics.
 

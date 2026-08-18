@@ -23,8 +23,10 @@ import time
 import cv2
 import numpy as np
 
-from gmm_mask import GMM_Mask_Numba
+from gmm_mask import (GMM_Mask_CPU, GMM_Mask_CUDA, GMM_Mask_CUDA_v1,
+                      GMM_Mask_CUDA_v2, GMM_Mask_CuPy, GMM_Mask_Numba)
 from settings import MOG2_BG_PROB_THRESHOLD
+from utils.post_processing import fill_holes, refine_mask
 
 DEFAULT_DIR = os.environ.get("HIGHWAY_DIR", "highway")
 T0, T1 = 470, 1700
@@ -153,9 +155,116 @@ def build_chains(h, w):
     }
 
 
+MODELS = {
+    "cpu": GMM_Mask_CPU,
+    "numba": GMM_Mask_Numba,
+    "cuda": GMM_Mask_CUDA,
+    "cuda_v1": GMM_Mask_CUDA_v1,
+    "cuda_v2": GMM_Mask_CUDA_v2,
+    "cupy": GMM_Mask_CuPy,
+}
+
+
+def build_model(name, h, w, post=False, colorspace="ycrcb"):
+    cls = MODELS[name]
+    if cls is None:
+        raise SystemExit(f"--model {name} is unavailable on this machine")
+    # v1/v2 default to running the post chain on the device. For `score()` the
+    # host chains under test must all see the same raw model output, so the
+    # device post-processing is switched off there. Signature inspection, not
+    # try/except TypeError: that would also catch a real TypeError from inside
+    # __init__ and silently leave GPU post-processing on.
+    import inspect
+    params = inspect.signature(cls.__init__).parameters
+    kw = {}
+    if "post" in params:
+        kw["post"] = post
+    if "colorspace" in params:
+        kw["colorspace"] = colorspace
+    return cls(h, w, **kw)
+
+
+def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
+           t0=T0, t1=T1):
+    """Per-frame `np.array_equal` between the shipping mask of two backends.
+
+    This exists because the obvious check is not one, and because the first
+    version of this function was not one either.
+
+    *Not* an unchanged F1: F1 is a four-decimal summary of two million pixels,
+    and a mask can move by hundreds of them without shifting it. And `score()`
+    used to hardcode the Numba model, so running it after moving work onto the
+    GPU exercised the CPU path and cheerfully reported that the CPU path still
+    worked.
+
+    Nor is it enough to compare `apply()` with the device post-processing
+    switched off. That was this function's first mistake: it compared the raw
+    MOG2 decision, while the mask the pipeline actually ships comes from
+    `bg_prob < threshold` followed by a median, and — for v1/v2 — from a colour
+    conversion that now happens on the device. A backend could convert colour
+    wrongly, or tile the median wrongly, and still pass.
+
+    So this drives each backend through the path `main.py` drives it through:
+    `mask_from_bgr` -> device post chain -> host `fill_holes` where the backend
+    supports it, and host `cvtColor` -> `apply` -> `refine_mask` where it does
+    not. Then it compares the mask that would have been composited.
+    """
+    first = cv2.imread(os.path.join(root, "input", "in000001.jpg"))
+    if first is None:
+        raise SystemExit(f"no frames under {root}/input — set HIGHWAY_DIR")
+    h, w = first.shape[:2]
+
+    def shipping_chain(name):
+        """Return `fn(bgr) -> refined mask`, using each backend's real path."""
+        m = build_model(name, h, w, post=True, colorspace=colorspace)
+        if hasattr(m, "mask_from_bgr"):
+            return m, lambda bgr: fill_holes(m.mask_from_bgr(bgr))
+
+        cvt = ((lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb))
+               if colorspace == "ycrcb" else (lambda f: f))
+
+        def host(bgr):
+            mask, bg_prob, _ = m.apply(np.ascontiguousarray(cvt(bgr), np.float32))
+            return refine_mask(np.asarray(mask), bg_prob=np.asarray(bg_prob))
+        return m, host
+
+    _, run_a = shipping_chain(model_name)
+    _, run_b = shipping_chain(ref_name)
+
+    bad = worst = scored = 0
+    first_bad = None
+    saw_fg = False
+    for i in range(1, t1 + 1):
+        bgr = cv2.imread(os.path.join(root, "input", f"in{i:06d}.jpg"))
+        ma = run_a(bgr)
+        mb = run_b(bgr)
+        if i < t0:
+            continue
+        saw_fg |= bool((mb == 255).any())
+        n = int((np.asarray(ma) != np.asarray(mb)).sum())
+        if n and first_bad is None:
+            first_bad = i
+        bad += n
+        worst = max(worst, n)
+        scored += 1
+
+    px = scored * h * w
+    print(f"\nparity {model_name} vs {ref_name}, {colorspace}, shipping mask, "
+          f"frames {t0}-{t1} ({scored} frames, {px} pixels)")
+    print(f"  differing pixels : {bad}  ({bad / max(px, 1):.6%})")
+    print(f"  worst frame      : {worst} px")
+    print(f"  first difference : {first_bad if first_bad else 'none'}")
+    if not saw_fg:
+        print("  DEGENERATE       : no foreground in any frame — proves nothing")
+        return 1
+    print(f"  VERDICT          : {'IDENTICAL' if bad == 0 else 'DIVERGED'}")
+    return bad
+
+
 # ── scoring ───────────────────────────────────────────────────────────────────
 
-def score(root, colorspace="bgr", t0=T0, t1=T1, limit_chains=None):
+def score(root, colorspace="bgr", t0=T0, t1=T1, limit_chains=None,
+          model_name="numba"):
     roi = cv2.imread(os.path.join(root, "ROI.bmp"), 0) > 0
     first = cv2.imread(os.path.join(root, "input", "in000001.jpg"))
     if first is None:
@@ -164,7 +273,7 @@ def score(root, colorspace="bgr", t0=T0, t1=T1, limit_chains=None):
 
     cvt = ((lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb))
            if colorspace == "ycrcb" else (lambda f: f))
-    model = GMM_Mask_Numba(h, w)
+    model = build_model(model_name, h, w)
 
     chains = build_chains(h, w)
     if limit_chains:
@@ -215,8 +324,21 @@ if __name__ == "__main__":
     ap.add_argument("--dir", default=DEFAULT_DIR)
     ap.add_argument("--colorspace", default="both", choices=("bgr", "ycrcb", "both"))
     ap.add_argument("--last-frame", type=int, default=T1)
+    ap.add_argument("--model", default="numba", choices=sorted(MODELS),
+                    help="which backend produces the raw mask; the post chains "
+                         "under test are the same for all of them")
+    ap.add_argument("--parity-vs", metavar="BACKEND",
+                    help="compare --model against BACKEND frame by frame and "
+                         "exit non-zero on any difference. This is the gate; "
+                         "an unchanged F1 is not one.")
     args = ap.parse_args()
+
+    if args.parity_vs:
+        cs = "ycrcb" if args.colorspace == "both" else args.colorspace
+        bad = parity(args.dir, args.model, args.parity_vs, cs,
+                     t1=args.last_frame)
+        raise SystemExit(0 if bad == 0 else 1)
 
     spaces = ("bgr", "ycrcb") if args.colorspace == "both" else (args.colorspace,)
     for cs in spaces:
-        score(args.dir, cs, t1=args.last_frame)
+        score(args.dir, cs, t1=args.last_frame, model_name=args.model)

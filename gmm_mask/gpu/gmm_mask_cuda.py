@@ -18,7 +18,7 @@ class GMM_Mask_CUDA(GMM_Mask_Base):
         self.d_vars    = cuda.to_device(self.vars)
         self.d_weights = cuda.to_device(self.weights)
         self.d_modes   = cuda.to_device(self.modes)
-        self.d_mask    = cuda.to_device(self.d_mask)
+        self.d_mask    = cuda.to_device(self.mask)
         self.d_bg_prob = cuda.to_device(self.bg_prob)
 
         self.block = (TILE_X, TILE_Y)

@@ -1,0 +1,10 @@
+# Pinned, because the project's central claim is bit-exact agreement with
+# OpenCV and that claim is build-sensitive. The Q8 blur derivation and the
+# fixed-point YCrCb formula were verified against BOTH 4.13.0 and 5.0.0, which
+# is why the OpenCV pin is a floor rather than an equality — but re-run
+# tests/test_blur.py on any new environment before quoting a number from it.
+numpy>=2.0,<3
+opencv-python>=4.13,<6
+numba>=0.60,<0.62      # <0.62 so `numba.cuda` still resolves against Colab's numba-cuda
+pytest>=8
+matplotlib>=3.8        # notebook only
