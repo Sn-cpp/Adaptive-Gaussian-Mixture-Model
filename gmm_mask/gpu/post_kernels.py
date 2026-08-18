@@ -29,6 +29,21 @@ HALO = 2                    # a 5x5 window reaches 2 pixels either side
 MEDIAN_WIN = 25
 MEDIAN_MAJORITY = 13        # ceil(25 / 2)
 
+# Precomputed, and that is not cosmetic. `cuda.shared.array` needs its shape to
+# be a compile-time constant, and writing the arithmetic inline —
+# `cuda.shared.array((TILE_Y + 2 * HALO, ...), uint8)` — makes numba type the
+# expression as int64 and reject the overload:
+#
+#     Overload of function 'array': With argument(s):
+#     '(UniTuple(int64 x 2), class(uint8))': No match.
+#
+# CUDASIM never notices, because there the shape is just a Python tuple. So the
+# tiled median compiled and passed under the simulator for as long as it
+# existed and had never once run on a GPU. Hoisting the arithmetic to module
+# scope makes these plain Python ints, which numba sees as literals.
+SH_TILE_H = TILE_Y + 2 * HALO      # 12
+SH_TILE_W = TILE_X + 2 * HALO      # 36
+
 
 # ── v1: one kernel per stage ─────────────────────────────────────────────────
 
@@ -76,7 +91,7 @@ def median5_tiled_kernel(src, dst):
     shared memory turns those 25 global loads into 25 shared loads plus roughly
     1.4 global loads per pixel.
     """
-    sh = cuda.shared.array((TILE_Y + 2 * HALO, TILE_X + 2 * HALO), uint8)
+    sh = cuda.shared.array((SH_TILE_H, SH_TILE_W), uint8)
 
     tx = cuda.threadIdx.x
     ty = cuda.threadIdx.y
@@ -86,9 +101,9 @@ def median5_tiled_kernel(src, dst):
 
     # Cooperative load of the tile plus its halo. Strided so every thread does
     # its share regardless of how the halo divides into the block.
-    for sy in range(ty, TILE_Y + 2 * HALO, TILE_Y):
+    for sy in range(ty, SH_TILE_H, TILE_Y):
         gy = min(max(cuda.blockIdx.y * TILE_Y + sy - HALO, 0), H - 1)
-        for sx in range(tx, TILE_X + 2 * HALO, TILE_X):
+        for sx in range(tx, SH_TILE_W, TILE_X):
             gx = min(max(cuda.blockIdx.x * TILE_X + sx - HALO, 0), W - 1)
             sh[sy, sx] = src[gy, gx]
     cuda.syncthreads()

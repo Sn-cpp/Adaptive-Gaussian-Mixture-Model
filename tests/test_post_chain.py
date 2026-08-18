@@ -171,3 +171,48 @@ def test_v1_and_v2_produce_the_same_refined_mask_as_the_host_chain():
         "the GPU chain and the scored host chain disagree"
     assert (outs["v1"][0] == 255).any() and (outs["v1"][0] == 0).any(), \
         "degenerate mask — this test would pass on an all-zero chain"
+
+
+# ── the class of bug CUDASIM structurally cannot catch ────────────────────────
+
+@pytest.mark.skipif(os.environ.get("NUMBA_ENABLE_CUDASIM") == "1",
+                    reason="the point of this test is that CUDASIM cannot fail it")
+@pytest.mark.skipif(not gpu_available(), reason="needs a real CUDA device")
+def test_every_kernel_actually_compiles_on_real_hardware():
+    """Force nvvm to compile every kernel, and say why that is a test at all.
+
+    `median5_tiled_kernel` declared its shared array as
+
+        cuda.shared.array((TILE_Y + 2 * HALO, TILE_X + 2 * HALO), uint8)
+
+    which typed the shape expression as int64 and matched no overload:
+
+        Overload of function 'array': With argument(s):
+        '(UniTuple(int64 x 2), class(uint8))': No match.
+
+    Under CUDASIM the shape is just a Python tuple, so it passed there for as
+    long as it existed while never once having run on a GPU — and v2, which
+    depends on it, was in the same position. The fix was hoisting the
+    arithmetic to module scope so the values are plain ints.
+
+    A green CUDASIM suite is therefore a necessary and *not* sufficient
+    condition, and this test is the marker for that. It has to be run on real
+    hardware to mean anything, which is exactly the property it is asserting.
+    """
+    from gmm_mask.gpu import blur_kernels as bk
+    from gmm_mask.gpu import post_kernels as pk
+
+    pk.warmup()          # threshold, median naive, median tiled, dilate, erode
+    bk.warmup()          # blur naive, blur tiled, composite, colour conversion
+
+    for mod, names in ((pk, ["threshold_kernel", "median5_kernel",
+                             "median5_tiled_kernel", "dilate_kernel",
+                             "erode_kernel"]),
+                       (bk, ["blur_h_kernel", "blur_v_composite_kernel",
+                             "blur_h_tiled_kernel",
+                             "blur_v_composite_tiled_kernel",
+                             "bgr2ycrcb_planar_kernel"])):
+        for name in names:
+            k = getattr(mod, name)
+            assert k.definitions or k.overloads, \
+                f"{name} never compiled — warmup() does not launch it"
