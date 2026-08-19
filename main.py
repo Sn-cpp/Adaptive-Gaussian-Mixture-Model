@@ -105,8 +105,12 @@ def main():
                 refined = fill_holes(model.mask_from_bgr(frame))
                 result = model.composite(refined)
         else:
-            planar_in = np.ascontiguousarray(to_model(frame), dtype=np.float32)
-            mask, bg_prob, _ = model.apply(planar_in)
+            # Hand `apply()` the uint8 frame: it calls to_planar(), which
+            # transposes and casts in one pass. Casting to float32 here first
+            # made that cast a second full-frame copy -- 2.2 ms a frame at
+            # 1080p, buying nothing, since to_planar produces the identical
+            # array either way.
+            mask, bg_prob, _ = model.apply(to_model(frame))
             refined = refine_mask(np.asarray(mask), bg_prob=bg_prob,
                                   do_fill=not args.no_fill)
             result = background_blur(frame, refined, BLUR_KSIZE, BLUR_SIGMA)

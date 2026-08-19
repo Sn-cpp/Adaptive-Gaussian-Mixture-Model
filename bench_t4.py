@@ -55,7 +55,7 @@ def blur(rounds=7, inner=20):
     from numba import cuda
     print("Kernel 2 -- blur + composite only, no transfers")
     print(f"  {'size':>7} {'host cv2':>10} {'GPU naive':>10} {'GPU tiled':>10} "
-          f"{'tiled/host':>11} {'tiled/naive':>12}")
+          f"{'host/tiled':>11} {'naive/tiled':>12}")
     d_kq = cuda.to_device(bk.gaussian_kernel_q8())
     block = (bk.BLUR_TILE_X, bk.BLUR_TILE_Y)
     for (w, h), lbl in SIZES:
@@ -78,9 +78,14 @@ def blur(rounds=7, inner=20):
         host = lambda: background_blur(img, msk, BLUR_KSIZE, BLUR_SIGMA)
         for _ in range(5):
             gpu(False); gpu(True); host()
-        th = _median(host, rounds, inner)
-        tn = _median(lambda: gpu(False), rounds, inner)
-        tt = _median(lambda: gpu(True), rounds, inner)
+        # Interleaved, not three consecutive batches: on a shared T4 a batch
+        # measures whatever the machine was doing during that batch.
+        acc = {"host": [], "naive": [], "tiled": []}
+        for _ in range(rounds):
+            acc["host"].append(_median(host, 1, inner))
+            acc["naive"].append(_median(lambda: gpu(False), 1, inner))
+            acc["tiled"].append(_median(lambda: gpu(True), 1, inner))
+        th, tn, tt = (float(np.median(acc[k])) for k in ("host", "naive", "tiled"))
         print(f"  {lbl:>7} {th:9.3f}ms {tn:9.3f}ms {tt:9.3f}ms "
               f"{th/tt:10.1f}x {tn/tt:11.2f}x")
 
@@ -108,7 +113,11 @@ def ingest(rounds=7, inner=20, size=(1920, 1080)):
     for _ in range(5):
         for f in steps.values():
             f()
-    r = {k: _median(f, rounds, inner) for k, f in steps.items()}
+    acc = {k: [] for k in steps}
+    for _ in range(rounds):                 # interleaved across stages
+        for k, f in steps.items():
+            acc[k].append(_median(f, 1, inner))
+    r = {k: float(np.median(v)) for k, v in acc.items()}
 
     print(f"\nKernel 0 -- frame ingest at {w}x{h}, decomposed")
     for k, v in r.items():
@@ -125,18 +134,19 @@ def ingest(rounds=7, inner=20, size=(1920, 1080)):
     print("  3 B/px upload possible -- the conversion had to happen somewhere.")
 
 
-def baseline(n=24):
+def baseline(n=40, warm=8):
     print("\nv2 against Numba CPU -- the honest baseline")
     print(f"  {'size':>7} {'Numba CPU':>11} {'v2 GPU':>9} {'speedup':>9} "
           f"{'Numba FPS':>10} {'v2 FPS':>8}")
     for (w, h), lbl in SIZES:
         frames = bp.make_frames(n, (w, h))
-        tn = bp.one_pass(lambda: GMM_Mask_Numba(h, w), bp.run_v0, frames, warm=6)
-        tg = bp.one_pass(lambda: GMM_Mask_CUDA_v2(h, w), bp.run_gpu, frames, warm=6)
+        tn = bp.one_pass(lambda: GMM_Mask_Numba(h, w), bp.run_v0, frames, warm=warm)
+        tg = bp.one_pass(lambda: GMM_Mask_CUDA_v2(h, w), bp.run_gpu, frames, warm=warm)
         print(f"  {lbl:>7} {tn:9.2f}ms {tg:7.2f}ms {tn/tg:8.2f}x "
               f"{1000/tn:10.1f} {1000/tg:8.1f}")
-    print("\n  Single passes, not medians -- expect these to read slower than")
-    print("  bench_post.py's table. Quote that one; this is for the ratio.")
+    print("\n  Single passes, not medians. Same 40 frames and 8 warmups as")
+    print("  bench_post.py so the two are comparable, but expect these to read")
+    print("  slower -- quote bench_post.py's medians; this is for the ratio.")
 
 
 def equivalence(n=120, size=(1920, 1080)):

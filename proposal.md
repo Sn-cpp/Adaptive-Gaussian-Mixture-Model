@@ -41,7 +41,7 @@ At Full HD (1920×1080) each frame holds about 2 million pixels. A Gaussian Mixt
 
 - **Dataset:** CDnet 2014, `baseline/highway` — 1700 frames at 320×240 of a fixed traffic camera, with per-frame hand-labelled ground truth.
 - **Source:** http://changedetection.net/ — note that as of this writing the download host no longer resolves, so quality has to be scored against a local copy (`HIGHWAY_DIR=...`).
-- **Why this one:** it is publicly downloadable, and it ships pixel-accurate ground truth, a region of interest (`ROI.bmp`), and a scoring window (`temporalROI.txt` = frames 470–1700). That means every quality claim in this project is a number against a published label set, not an opinion about a screenshot.
+- **Why this one:** it ships pixel-accurate ground truth, a region of interest (`ROI.bmp`), and a scoring window (`temporalROI.txt` = frames 470–1700). That means every quality claim in this project is a number against a published label set, not an opinion about a screenshot.
 - **Scoring protocol:** F1 and IoU over frames 470–1700, counting only pixels whose ground truth is 0 or 255 inside the ROI. CDnet labels shadows as 50 and object boundaries as 170 and defines both as *don't care*; scoring them is the easiest way to publish a wrong number, so we exclude them explicitly.
 - **Benchmark sizes:** the same sequence upscaled to 854×480, 1280×720 and 1920×1080 for throughput measurement. Quality is always scored at the native 320×240, where the ground truth lives.
 
@@ -113,7 +113,7 @@ display / write
 
 ### 3. The Challenge
 
-1. **Large per-pixel state (memory bandwidth).** K=5 Gaussians per pixel, each with weight, 3-channel mean and variance: at 1080p that is about 31M float32 values, ~120 MB of model state read and written every frame. That arithmetic intensity is low enough that we expect the kernel to be bandwidth-bound rather than compute-bound — an expectation from the byte count, not a roofline measurement — so the state is stored planar, `means[k][c][y][x]`, which makes adjacent threads read adjacent addresses and lets every access coalesce.
+1. **Large per-pixel state (memory bandwidth).** K=5 Gaussians per pixel, each with a weight, a 3-channel mean and a variance — 5 + 15 + 5 = **25 float32 per pixel**. At 1080p that is 51.8M values, **207 MB** of model state read and written every frame. (An earlier draft said 31M/120 MB, having counted the means and forgotten the weights and variances; the arrays are `means (K,C,H,W)`, `vars (K,H,W)`, `weights (K,H,W)` and the figure above is their `nbytes`.) That arithmetic intensity is low enough that we expect the kernel to be bandwidth-bound rather than compute-bound — an expectation from the byte count, not a roofline measurement — so the state is stored planar, `means[k][c][y][x]`, which makes adjacent threads read adjacent addresses and lets every access coalesce.
 
 2. **Branch divergence in the update.** Matched / not-matched / replace-weakest sends threads in a warp down different paths. We have not isolated its cost with a profiler, and say so rather than quoting a figure; what we can report is the end-to-end effect, which is in `RESULTS-T4.md`.
 
@@ -121,7 +121,7 @@ display / write
 
 4. **Host↔device transfer is the thing to optimise, not the kernel.** This is what motivates v1. In v0 the GPU computes the confidence map and copies it back so OpenCV can threshold it — float32, 4 bytes a pixel, 8 MB per frame at 1080p. Moving the threshold and median onto the device means one byte a pixel comes back instead, already refined.
 
-5. **A mask that scores well can still be wrong.** A closing wide enough to bridge a gap in one car will also bridge the road between two cars, and F1 barely notices: in our own testing a 15×15 closing across a 10-pixel gap merged two objects while F1 stayed near 0.96. Every candidate is checked for this, not just scored.
+5. **A mask that scores well can still be wrong.** A closing wide enough to bridge a gap in one car also bridges the road between two cars, and the summary barely notices: in the scored table a 15×15 closing moves F1 by 0.006 while precision falls 0.9863 → 0.9634. Every candidate is looked at, not just scored. (The specific two-cars-merged observation was an eyeball check during that run; it is not reproducible from this checkout.)
 
 6. **Split development environment.** macOS on Apple Silicon has no CUDA. We develop and verify on the CPU locally, run the CUDA kernels under `NUMBA_ENABLE_CUDASIM=1` for correctness, and measure on a Colab T4.
 
@@ -172,7 +172,7 @@ display / write
 | Version | What runs where | Why |
 |---|---|---|
 | **v0** | mask on GPU; colour convert, threshold, median, fill, blur, composite on host | baseline; uploads 12 bytes/pixel and copies 5 back |
-| **v1** | colour convert, threshold, median, blur and composite as CUDA kernels; fill on host | only the frame goes up (3 bytes/pixel) and only the composite comes back |
+| **v1** | colour convert, threshold, median, blur and composite as CUDA kernels; fill on host | the frame goes up as 3 bytes/pixel instead of 12, and the confidence map stops coming back; the mask still makes a round trip for the host fill |
 | **v2** | threshold **fused** into the model kernel's epilogue; median and blur shared-memory tiled | fewer launches; each pixel read once per block instead of 25 (median) or 15 (blur) times |
 
   Measured bus traffic per frame at 1080p, computed by `bench_post.py` from the array shapes
@@ -207,7 +207,7 @@ Correctness is layered, and each layer is a file a marker can run:
 - `tests/test_post_chain.py` — the threshold and median kernels against the host chain, plus a check that every kernel compiles on real hardware (deliberately skipped under CUDASIM: the simulator cannot fail it, which is the point).
 - `tests/test_scoring.py` — the CDnet protocol itself, on a fixture whose TP/FP/FN are countable by hand. Shadows (50), unknown boundaries (170) and out-of-ROI pixels must all be excluded; the fixture is built so that including them visibly changes the score.
 
-All three run without a GPU under `NUMBA_ENABLE_CUDASIM=1`.
+All of these run without a GPU under `NUMBA_ENABLE_CUDASIM=1`, except the compile check, which is skipped there on purpose.
 
 **Measured agreement with OpenCV's own MOG2:** bit-identical on synthetic sequences (0 of 30 720 pixels over 20 frames; 0 of 92 160 under heavy noise; 0 of 204 800 at 64×80), and 22 pixels of 1 536 000 — 0.0014%, all in a single frame — on real video. The residue is the float32 boundary: OpenCV accumulates in a different order and contracts its own FMAs, so a pixel within an ulp of `Tb·σ²` falls on either side of the comparison. Synthetic frames put almost nothing that close to the threshold; camera noise does. We report both numbers rather than the flattering one.
 

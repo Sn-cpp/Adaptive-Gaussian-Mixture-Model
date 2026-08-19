@@ -26,7 +26,8 @@ import numpy as np
 from gmm_mask import (GMM_Mask_CPU, GMM_Mask_CUDA, GMM_Mask_CUDA_v1,
                       GMM_Mask_CUDA_v2, GMM_Mask_CuPy, GMM_Mask_Numba)
 from settings import MOG2_BG_PROB_THRESHOLD
-from utils.post_processing import fill_holes, refine_mask
+from settings import BLUR_KSIZE, BLUR_SIGMA
+from utils.post_processing import background_blur, fill_holes, refine_mask
 
 DEFAULT_DIR = os.environ.get("HIGHWAY_DIR", "highway")
 T0, T1 = 470, 1700
@@ -215,50 +216,91 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
     h, w = first.shape[:2]
 
     def shipping_chain(name):
-        """Return `fn(bgr) -> refined mask`, using each backend's real path."""
+        """Return `fn(bgr) -> (refined mask, composite)` via the backend's real path.
+
+        The composite matters as much as the mask. A backend could produce an
+        identical mask and still blur differently — that is precisely what
+        Kernel 2 changed — so comparing only the mask would leave the half of
+        the pipeline this project actually rewrote unchecked.
+        """
         m = build_model(name, h, w, post=True, colorspace=colorspace)
         if hasattr(m, "mask_from_bgr"):
-            return m, lambda bgr: fill_holes(m.mask_from_bgr(bgr))
+            def gpu(bgr):
+                refined = fill_holes(m.mask_from_bgr(bgr))
+                return refined, m.composite(refined)
+            return m, gpu
 
         cvt = ((lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb))
                if colorspace == "ycrcb" else (lambda f: f))
 
         def host(bgr):
-            mask, bg_prob, _ = m.apply(np.ascontiguousarray(cvt(bgr), np.float32))
-            return refine_mask(np.asarray(mask), bg_prob=np.asarray(bg_prob))
+            mask, bg_prob, _ = m.apply(cvt(bgr))
+            refined = refine_mask(np.asarray(mask), bg_prob=np.asarray(bg_prob))
+            return refined, background_blur(bgr, refined, BLUR_KSIZE, BLUR_SIGMA)
         return m, host
 
     _, run_a = shipping_chain(model_name)
     _, run_b = shipping_chain(ref_name)
 
-    bad = worst = scored = 0
+    bad = bad_c = worst = scored = 0
     first_bad = None
     saw_fg = False
     for i in range(1, t1 + 1):
         bgr = cv2.imread(os.path.join(root, "input", f"in{i:06d}.jpg"))
-        ma = run_a(bgr)
-        mb = run_b(bgr)
+        ma, ca = run_a(bgr)
+        mb, cb = run_b(bgr)
         if i < t0:
             continue
         saw_fg |= bool((mb == 255).any())
         n = int((np.asarray(ma) != np.asarray(mb)).sum())
-        if n and first_bad is None:
+        nc = int((np.asarray(ca) != np.asarray(cb)).sum())
+        if (n or nc) and first_bad is None:
             first_bad = i
         bad += n
+        bad_c += nc
         worst = max(worst, n)
         scored += 1
 
     px = scored * h * w
-    print(f"\nparity {model_name} vs {ref_name}, {colorspace}, shipping mask, "
-          f"frames {t0}-{t1} ({scored} frames, {px} pixels)")
-    print(f"  differing pixels : {bad}  ({bad / max(px, 1):.6%})")
-    print(f"  worst frame      : {worst} px")
-    print(f"  first difference : {first_bad if first_bad else 'none'}")
+    print(f"\nparity {model_name} vs {ref_name}, {colorspace}, shipping mask and "
+          f"composite, frames {t0}-{t1} ({scored} frames, {px} pixels each)")
+    print(f"  mask differing pixels   : {bad}  ({bad / max(px, 1):.6%})")
+    print(f"  composite differing px  : {bad_c}  ({bad_c / max(px * 3, 1):.6%})")
+    print(f"  worst mask frame       : {worst} px")
+    print(f"  first difference       : {first_bad if first_bad else 'none'}")
     if not saw_fg:
-        print("  DEGENERATE       : no foreground in any frame — proves nothing")
+        print("  DEGENERATE             : no foreground in any frame — proves nothing")
         return 1
-    print(f"  VERDICT          : {'IDENTICAL' if bad == 0 else 'DIVERGED'}")
-    return bad
+    print(f"  VERDICT                : "
+          f"{'IDENTICAL' if bad == 0 and bad_c == 0 else 'DIVERGED'}")
+    return bad + bad_c
+
+
+def scorable(gt, roi):
+    """The pixels CDnet says may be scored at all.
+
+    CDnet labels shadows 50 and object boundaries 170 and defines both as
+    *don't care*, and it ships an ROI mask. Counting either is the easiest way
+    in this project to publish a confident, reproducible, wrong number, so the
+    rule lives in one function that `tests/test_scoring.py` imports and checks
+    against a fixture whose answer is countable by hand.
+    """
+    return roi & ((gt == 255) | (gt == 0))
+
+
+def confusion(pred, gt, roi):
+    """(TP, FP, FN) over the scorable pixels only."""
+    valid = scorable(gt, roi)
+    g = (gt == 255) & valid
+    p = (pred == 255) & valid
+    return int(np.sum(p & g)), int(np.sum(p & ~g)), int(np.sum(~p & g))
+
+
+def metrics(tp, fp, fn):
+    """(F1, IoU, precision, recall). Zero-safe: an empty mask scores 0."""
+    p = tp / max(tp + fp, 1)
+    r = tp / max(tp + fn, 1)
+    return (2 * p * r / max(p + r, 1e-9), tp / max(tp + fp + fn, 1), p, r)
 
 
 # ── scoring ───────────────────────────────────────────────────────────────────
@@ -285,22 +327,18 @@ def score(root, colorspace="bgr", t0=T0, t1=T1, limit_chains=None,
 
     for i in range(1, t1 + 1):
         bgr = cv2.imread(os.path.join(root, "input", f"in{i:06d}.jpg"))
-        frame = np.ascontiguousarray(cvt(bgr), dtype=np.float32)
+        frame = cvt(bgr)
         mask, bg_prob, _ = model.apply(frame)
         if i < t0:
             continue
         # the Sobel gate reads image texture, so it always sees BGR
         sob = sobel_edges(np.ascontiguousarray(bgr, dtype=np.float32))
         gt = cv2.imread(os.path.join(root, "groundtruth", f"gt{i:06d}.png"), 0)
-        valid = roi & ((gt == 255) | (gt == 0))
-        g = (gt == 255) & valid
-
         for name, fn in chains.items():
             t = time.perf_counter()
             out = fn(np.asarray(mask), np.asarray(bg_prob), sob)
             secs[name] += time.perf_counter() - t
-            p = (out == 255) & valid
-            acc[name] += [np.sum(p & g), np.sum(p & ~g), np.sum(~p & g)]
+            acc[name] += confusion(out, gt, roi)
             empty[name] += not (out == 255).any()
         scored += 1
 
@@ -309,10 +347,9 @@ def score(root, colorspace="bgr", t0=T0, t1=T1, limit_chains=None,
           f"{'empty':>6s} {'ms/f':>7s}")
     rows = []
     for name, (tp, fp, fn_) in acc.items():
-        p = tp / max(tp + fp, 1)
-        r = tp / max(tp + fn_, 1)
-        rows.append((2 * p * r / max(p + r, 1e-9), tp / max(tp + fp + fn_, 1),
-                     p, r, empty[name], secs[name] / max(scored, 1) * 1000, name))
+        f1, iou, p, r = metrics(tp, fp, fn_)
+        rows.append((f1, iou, p, r, empty[name],
+                     secs[name] / max(scored, 1) * 1000, name))
     for f1, iou, p, r, e, ms, name in sorted(rows, reverse=True):
         print(f"  {name:36s} {f1:7.4f} {iou:7.4f} {p:7.4f} {r:7.4f} "
               f"{e:6d} {ms:7.2f}")

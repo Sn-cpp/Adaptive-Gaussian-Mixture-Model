@@ -8,9 +8,10 @@ reproducible F1 forever.
 
 CDnet labels shadows 50 and object boundaries 170 and defines both as
 *don't care*, and it ships an ROI mask. Counting either is, in the proposal's
-own words, the easiest way to publish a wrong number. These tests build a 6x6
-frame where every category appears exactly once and the true TP/FP/FN are
-countable by eye.
+own words, the easiest way to publish a wrong number. These tests build a 3x4
+fixture carrying every category — true foreground, true background, shadow,
+unknown, and out-of-ROI — where the true TP/FP/FN are countable by eye and are
+written into the assertions.
 
 No GPU, no dataset — this is the part of the quality claim that can be checked
 without CDnet, which matters because the CDnet download is offline.
@@ -22,23 +23,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 import numpy as np
 
-
-def confusion(pred, gt, roi):
-    """The arithmetic eval_highway.py performs, isolated.
-
-    Mirrors eval_highway.score(): `valid` keeps only ground truth that is
-    exactly 0 or 255 inside the ROI, and TP/FP/FN are counted over that subset.
-    """
-    valid = roi & ((gt == 255) | (gt == 0))
-    g = (gt == 255) & valid
-    p = (pred == 255) & valid
-    return int((p & g).sum()), int((p & ~g).sum()), int((~p & g).sum())
+# Import the production functions. An earlier version of this file
+# re-implemented them and then asserted, by substring search, that
+# eval_highway.py still contained the same expression -- which would have
+# passed with that expression commented out, and drifts the moment either copy
+# is edited. Test the thing that runs.
+from eval_highway import confusion, metrics, scorable
 
 
 def f1_iou(tp, fp, fn):
-    p = tp / max(tp + fp, 1)
-    r = tp / max(tp + fn, 1)
-    return 2 * p * r / max(p + r, 1e-9), tp / max(tp + fp + fn, 1)
+    f1, iou, _, _ = metrics(tp, fp, fn)
+    return f1, iou
 
 
 def fixture():
@@ -111,17 +106,18 @@ def test_counting_dont_care_pixels_would_change_the_score():
         "this fixture cannot distinguish correct scoring from naive scoring")
 
 
-def test_eval_highway_uses_the_same_rule_this_file_tests():
-    """Pin the fixture to the real scorer rather than to a copy of it.
+def test_scorable_excludes_exactly_the_three_categories_it_should():
+    """`scorable` is the whole protocol in one expression; pin its truth table."""
+    gt = np.array([[0, 255, 50, 170]], np.uint8)
+    roi = np.ones((1, 4), bool)
+    assert list(scorable(gt, roi)[0]) == [True, True, False, False]
+    roi[0, 0] = False
+    assert list(scorable(gt, roi)[0]) == [False, True, False, False]
 
-    A test that re-implements the thing under test drifts away from it. This
-    reads the module and asserts the two defining expressions are still there,
-    so a change to the protocol in eval_highway.py fails here.
-    """
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            '..', 'eval_highway.py')).read()
-    assert "roi & ((gt == 255) | (gt == 0))" in src, (
-        "eval_highway.py no longer builds `valid` the way this fixture assumes")
-    assert "T0, T1 = 470, 1700" in src, (
-        "the temporal window changed; CDnet's own temporalROI for highway is "
-        "470-1700 and a different window moves F1 by up to 5 points")
+
+def test_the_temporal_window_is_cdnets_own():
+    """470-1700 is `temporalROI.txt` for highway. A different window moves F1
+    by up to 5 points, and was the single largest source of contradictory
+    measurements in this project — so it is pinned rather than trusted."""
+    import eval_highway
+    assert (eval_highway.T0, eval_highway.T1) == (470, 1700)

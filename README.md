@@ -16,8 +16,8 @@ Measured on a Colab T4: **86.5 FPS at 1080p**, 5.72× over the v0 baseline and
 
 ```bash
 pip install -r requirements.txt
-python main.py --input_path highway.mp4 --model numba
-python main.py --input_path highway.mp4 --model cuda_v2 --no-display
+python main.py --input_path LTSSUD-Test.mp4 --model numba
+python main.py --input_path LTSSUD-Test.mp4 --model cuda_v2 --no-display
 ```
 
 `--model` is one of `cpu numba cuda cuda_v1 cuda_v2 cupy`. The GPU backends
@@ -34,7 +34,7 @@ eval_highway.py             F1/IoU against CDnet, and the parity gate
 bench_post.py               per-stage timing for v0/v1/v2, and the equivalence gate
 bench_t4.py                 the isolated Kernel 0/Kernel 2 and baseline measurements
 bench_fill.py               flood fill vs data-parallel reconstruction
-notebook.ipynb              the report: runs everything, transcribes nothing
+notebook.ipynb              the report: recomputes what it can, labels what it quotes
 utils/post_processing.py    the host chain — the specification the kernels match
 gmm_mask/
   cpu/gmm_mask_cpu.py       sequential Python, the readable transliteration

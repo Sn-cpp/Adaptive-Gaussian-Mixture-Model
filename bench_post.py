@@ -97,8 +97,9 @@ def make_frames(n, size, seed=0):
 
 def run_v0(model, frame_bgr):
     """Host everything except the model kernel — the baseline being beaten."""
-    ycrcb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)
-    mask, bg_prob, _ = model.apply(np.ascontiguousarray(ycrcb, np.float32))
+    # uint8 in: to_planar() inside apply() does the transpose and the cast
+    # together, so casting here would only add a redundant full-frame copy.
+    mask, bg_prob, _ = model.apply(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb))
     refined = refine_mask(np.asarray(mask), bg_prob=np.asarray(bg_prob))
     return refined, background_blur(frame_bgr, refined, BLUR_KSIZE, BLUR_SIGMA)
 

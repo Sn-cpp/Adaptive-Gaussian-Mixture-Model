@@ -88,6 +88,53 @@ def traffic(n=NFRAMES, shape=(H, W), seed=0):
     return out
 
 
+PRUNE_ALPHA = 0.2
+
+
+def transient(n=20, shape=(H, W), seed=3):
+    """A sequence that reaches Zivkovic's complexity-reduction branch.
+
+    `traffic()` does not, and that matters: over its ten frames no pixel's
+    active-component count ever *decreases*, so a test built on it passes
+    whether or not the prune exists. That is exactly how the CuPy backend went
+    on shipping with `nmodes -= 1` commented out.
+
+    Reaching the branch needs a component that is created and then abandoned
+    long enough for its weight to fall below `alpha * CT`. The default learning
+    rate ramps down as 1/min(2n, history), which shrinks the *threshold* faster
+    than it decays the weight, so the branch is unreachable in a short run. A
+    fixed alpha fixes both. At 0.2 the object's modes are pruned around frame
+    17; the test asserts the decrement rather than trusting this comment.
+    """
+    h, w = shape
+    rng = np.random.default_rng(seed)
+    road = rng.integers(70, 100, (h, w, 3), dtype=np.uint8)
+    out = []
+    for i in range(n):
+        f = road.astype(np.float32)
+        if 2 <= i < 6:                       # appears, then gone for good
+            f[h // 4:3 * h // 4, w // 5:4 * w // 5] = 230.0
+        out.append(np.ascontiguousarray(
+            np.clip(f + rng.normal(0, 1.0, f.shape), 0, 255), dtype=np.uint8))
+    return out
+
+
+def run_and_watch_pruning(cls, frames, alpha=PRUNE_ALPHA, **kw):
+    """Drive a backend at fixed alpha and count how often a mode was dropped."""
+    model = cls(H, W, **kw)
+    masks, drops, prev = [], 0, None
+    for f in frames:
+        mask, _, _ = model.apply(f.astype(np.float32), update_alpha=alpha)
+        masks.append(np.asarray(mask).copy())
+        if hasattr(model, "sync_state"):
+            model.sync_state()
+        cur = model.modes.copy()
+        if prev is not None:
+            drops += int((cur < prev).sum())
+        prev = cur
+    return model, masks, drops
+
+
 def run(cls, frames, **kw):
     """Drive one backend over the sequence; return **every** mask.
 
@@ -315,30 +362,66 @@ def cupy_available():
 
 
 @pytest.mark.skipif(not cupy_available(), reason="cupy or a CUDA device is unavailable")
-def test_cupy_matches_the_cpu_reference():
+def test_cupy_matches_the_cpu_reference_including_the_prune():
     """The backend that was silently a different algorithm.
 
     `step_kernel_cp_v1.cu` had Zivkovic's complexity-reduction step commented
     out — the component prune and the `nmodes` decrement both. So CuPy kept
-    components the other three backends delete, its mixtures diverged from
-    them over time, and nothing noticed because no test ever compared it: the
-    CUDA parity test parametrised over cuda/v1/v2 and stopped there, while
-    `main.py` and the README offered `--model cupy` as an ordinary choice.
+    components the other three backends delete, and nothing noticed, because
+    no test compared it at all.
 
-    CUDASIM cannot stand in here — CuPy compiles real NVRTC — so this test is
-    skipped everywhere except a machine with cupy and a device. It is the only
-    thing standing between that kernel and a silent regression.
+    Restoring it is not enough; the test has to *reach* the branch. The first
+    version of this test used `traffic()`, where no pixel's mode count ever
+    decreases, so it would have passed against the broken kernel too. The
+    assertion below on `drops` is the guard against that regression in the
+    test itself.
     """
     from gmm_mask import GMM_Mask_CuPy
 
-    frames = traffic()
-    ref, m_ref, p_ref = run(GMM_Mask_Numba, frames)
-    cp_model, m_cp, p_cp = run(GMM_Mask_CuPy, frames)
+    frames = transient()
+    ref, m_ref, drops = run_and_watch_pruning(GMM_Mask_Numba, frames)
+    assert drops > 0, (
+        "the fixture never pruned a component — this test cannot distinguish "
+        "a correct kernel from one with the prune commented out")
 
-    assert_not_degenerate(m_ref[-1])
+    cp_model, m_cp, cp_drops = run_and_watch_pruning(GMM_Mask_CuPy, frames)
+
+    assert_not_degenerate(m_ref[3])
     assert_all_frames_equal(m_ref, m_cp, "Numba vs CuPy")
-    for i, (a, b) in enumerate(zip(p_ref, p_cp)):
-        assert np.allclose(a, b, atol=1e-5), f"CuPy: bg_prob differs at frame {i}"
-    assert np.array_equal(ref.modes, cp_model.modes), (
-        "CuPy's active-component count diverged — the complexity-reduction "
-        "step is the thing that was commented out, so this is where it shows")
+    assert cp_drops == drops, (
+        f"CuPy pruned {cp_drops} components where the reference pruned "
+        f"{drops} — the complexity-reduction rule differs")
+    for field in ("weights", "means", "vars"):
+        a, b = getattr(ref, field), getattr(cp_model, field)
+        assert np.allclose(a, b, atol=1e-5), (
+            f"CuPy: {field} drifted (max |delta| {np.abs(a - b).max():.3g})")
+    assert np.array_equal(ref.modes, cp_model.modes)
+
+
+@requires_gpu
+@pytest.mark.parametrize("name", ["cuda", "cuda_v1", "cuda_v2"])
+def test_cuda_backends_agree_on_the_prune_branch_too(name):
+    """`traffic()` never prunes, so the tests above never checked this path.
+
+    The complexity-reduction rule is the one place the backends were known to
+    have diverged once, and it is per-pixel branchy — exactly the kind of thing
+    a transliteration gets wrong.
+    """
+    from gmm_mask import GMM_Mask_CUDA, GMM_Mask_CUDA_v1, GMM_Mask_CUDA_v2
+    cls, kw = {
+        "cuda": (GMM_Mask_CUDA, {}),
+        "cuda_v1": (GMM_Mask_CUDA_v1, {"post": False}),
+        "cuda_v2": (GMM_Mask_CUDA_v2, {"post": False}),
+    }[name]
+    if cls is None:
+        pytest.skip("CUDA backends unavailable")
+
+    frames = transient()
+    ref, m_ref, drops = run_and_watch_pruning(GMM_Mask_Numba, frames)
+    assert drops > 0, "fixture does not reach the prune branch"
+
+    gpu, m_gpu, gpu_drops = run_and_watch_pruning(cls, frames, **kw)
+    assert_all_frames_equal(m_ref, m_gpu, f"Numba vs {name} (pruning sequence)")
+    assert gpu_drops == drops, (
+        f"{name} pruned {gpu_drops} components against the reference's {drops}")
+    assert np.array_equal(ref.modes, gpu.modes)

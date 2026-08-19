@@ -21,9 +21,24 @@ That is the shape of the argument, and this file checks both halves of it:
 
     python bench_fill.py --sizes 240 480 1080
 
-CPU-only by design. The point is the iteration count, which is a property of the
-algorithm and not of the hardware: a CUDA dilate is faster per pass, but it
-still needs one grid-wide synchronisation per pass, and there are hundreds.
+**What this does and does not measure.** Both timings are CPU: OpenCV's
+`floodFill` against a Python loop over `cv2.dilate` plus a convergence check.
+No CUDA reconstruction was implemented or measured, so read the millisecond
+column as an order of magnitude, not as the number a tuned GPU implementation
+would produce. The **pass count** is the durable result — it is a property of
+this formulation and of the image, not of the hardware, and a CUDA dilate that
+is a hundred times faster per pass still needs one grid-wide synchronisation
+between each of them.
+
+Nor is this the only conceivable parallel algorithm; it is the standard one.
+The claim being supported is "this formulation costs hundreds of dependent
+full-frame passes", not "no parallel flood fill can ever be worthwhile".
+
+Connectivity is the one detail that would rig the comparison. `cv2.floodFill`
+defaults to 4-connectivity, so the structuring element here is `MORPH_CROSS`,
+which is also 4-connected. `MORPH_RECT` would propagate diagonally, converge in
+fewer passes, and compute a *different* answer — which is why the equality
+check below is not a formality.
 """
 import argparse
 import time
@@ -34,6 +49,7 @@ import numpy as np
 from utils.post_processing import fill_holes
 
 SIZES = {240: (320, 240), 480: (854, 480), 720: (1280, 720), 1080: (1920, 1080)}
+REPEATS = 3
 
 
 def blobby(h, w, seed=0, thresh=0.52, sigma=31):
@@ -89,8 +105,9 @@ def run(size, seed=0):
     b, iters = fill_by_reconstruction(mask)
     agree = np.array_equal(a, b)
 
-    t_seq = timeit(fill_holes, mask)
-    t_rec = timeit(lambda m: fill_by_reconstruction(m)[0], mask, repeats=1)
+    # Equal repeats, or the two medians are not comparable.
+    t_seq = timeit(fill_holes, mask, repeats=REPEATS)
+    t_rec = timeit(lambda m: fill_by_reconstruction(m)[0], mask, repeats=REPEATS)
 
     holes = int(cv2.connectedComponents(((a != mask)).astype(np.uint8))[0]) - 1
     print(f"  {w}x{h:<6} {t_seq:9.2f} {t_rec:12.2f} {t_rec / t_seq:9.1f}x "

@@ -50,7 +50,9 @@ shapes, which is why the new blur kernels compiled and the pre-existing median d
 bug class. It **skips under CUDASIM by design**: a green simulator suite is a necessary and not
 a sufficient condition, and the test exists to say so.
 
-**Result after the fix: 52 / 52 tests pass on the T4.**
+**Result after the fix: 52 / 52 tests passed on the T4 at commit `a68253d`.** The suite has
+grown since — 64 locally under CUDASIM, plus CuPy and hardware-only cases that skip there — so
+re-run `pytest tests/ -q` on the GPU for the current count.
 
 ---
 
@@ -156,6 +158,10 @@ is CUDA streams overlapping frame N+1's ingest with frame N's flood fill, not a 
 | 720p | 6.359 ms | 1.874 | **0.793** | 8.0× | **2.36×** |
 | 1080p | 13.346 ms | 3.532 | **1.488** | 9.0× | **2.37×** |
 
+Measured with the three variants **batched**, not interleaved. `bench_t4.py` interleaves them
+now, so a re-run will move slightly; what the argument rests on is the 2.37× holding at all
+three sizes, which batching cannot manufacture.
+
 ### Frame ingest, decomposed at 1080p
 
 The "ingest is 9.6× faster" headline bundles three separate changes, only one of which is the
@@ -183,6 +189,18 @@ The conversion kernel costs **0.151 ms**. Being nearly free is what made the 3 B
 possible, since the conversion had to happen somewhere. The largest single win in this section
 is not a kernel: it is deleting a 25 MB numpy transpose from the host.
 
+Two caveats found afterwards, in opposite directions.
+
+*Understated:* stage B timed one fused `transpose().astype()`, while the host path at the time
+cast to float32 **first** and then let `to_planar` cast again — a redundant full-frame copy worth
+a further ~2.2 ms at 1080p. That redundancy has since been removed from `main.py`,
+`bench_post.py` and `eval_highway.py`, so the old path was worse than the table shows and the
+current host path is better.
+
+*Overstated as "the kernel":* the per-frame device allocation in stage C is still what v0 does,
+so 11% of the saving is "v1 preallocates a buffer", not "v1 converts on the device". The
+decomposition exists to make exactly that visible rather than to fold it into a headline.
+
 ---
 
 ## 6. Predictions, written before measuring
@@ -192,7 +210,7 @@ is not a kernel: it is deleting a 25 MB numpy transpose from the host.
 | host blur+composite @1080p | 4–8 ms | **13.3 ms** |
 | GPU blur kernels @1080p | 0.2–0.4 ms | **1.49 ms** (tiled) |
 | **tiled vs naive** | *"probably close to naive"* | **2.37× faster** |
-| ingest+blur saved @1080p | 4–8 ms | **~25 ms** |
+| ingest+blur saved @1080p | 4–8 ms | **~25 ms** (isolated; §3 has the end-to-end figure) |
 | bottleneck after the change | host `fill_holes`, not the blur | **confirmed, 35.9%** |
 | bus traffic reduction @1080p | −38.5% | **−52.9%** (the prediction omitted v0's `bg_prob` D2H) |
 
