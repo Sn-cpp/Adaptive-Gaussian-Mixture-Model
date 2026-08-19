@@ -173,16 +173,25 @@ def assert_not_degenerate(mask):
 
 
 def assert_some_frame_has_foreground(masks, label=""):
-    """The sequence-level version, for fixtures where foreground is transient.
+    """Some frame must contain both foreground and background.
 
-    Naming a specific frame index is a trap: `transient()` runs at a fixed
-    alpha of 0.2, which absorbs the object into the background within a frame
-    of it appearing, so only frame 2 carries foreground at all. Asserting on
-    frame 3 fails for a reason that has nothing to do with the backends being
-    compared — as it did, the first time this ran on hardware.
+    Two traps, both of which this guard fell into before landing here.
+
+    Naming a frame index is the first: `transient()` runs at a fixed alpha of
+    0.2 so the prune branch is reachable at all, and that same aggressive alpha
+    absorbs the object within one frame of it appearing — only frame 2 carries
+    foreground, so a check on frame 3 fails for reasons unrelated to the
+    backends being compared.
+
+    Taking the frame with the *most* foreground is the second: frame 0 is
+    always entirely foreground, because MOG2 starts with no components and
+    every pixel therefore fails to match. It is the maximum and it is useless.
+
+    What is actually wanted is one frame that discriminates: some foreground
+    and some background in the same mask.
     """
-    best = max(masks, key=lambda m: int((m == 255).sum()))
-    assert (best == 255).any() and (best == 0).any(), (
+    ok = any((m == 255).any() and (m == 0).any() for m in masks)
+    assert ok, (
         f"{label}: no frame in the sequence has both foreground and background "
         "— this comparison would pass on two broken backends")
 
