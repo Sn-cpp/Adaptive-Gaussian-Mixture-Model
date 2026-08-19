@@ -182,8 +182,10 @@ class GMM_Mask_CUDA_v1(GMM_Mask_Base):
         The conversion is bit-exact with `cv2.cvtColor`, so the model sees
         byte-identical input to the old path and the scored mask is unchanged.
         That is not an argument, it is a test — `test_blur.py` pins the kernel
-        against cv2 and `eval_highway.py --parity-vs` pins the resulting mask
-        across all 1231 scored frames.
+        against cv2, and `bench_t4.py --only equivalence` pins the resulting
+        mask across 120 frames at 1080p — measured, zero pixels differ.
+        `eval_highway.py --parity-vs` extends that to the 1231 scored CDnet
+        frames wherever the dataset is available.
 
         `to_host=False` leaves the mask on the device and returns the device
         array. That is the `--no-fill` path: the mask never has to come down

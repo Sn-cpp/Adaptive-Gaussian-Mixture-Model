@@ -35,12 +35,12 @@
 **Problem:**
 Separate moving objects from a static background in a video stream, then blur the background while keeping the objects sharp. This is the core of automated traffic monitoring — counting vehicles, flagging stopped cars, anonymising a scene before storage — and the segmentation step is what everything downstream depends on.
 
-At Full HD (1920×1080) each frame holds about 2 million pixels. A Gaussian Mixture Model with K=5 components updates 5 Gaussian distributions per pixel, so roughly 10 million distribution updates per frame, and a 15×15 Gaussian blur costs 225 multiply-accumulates per background pixel. In sequential Python the whole pipeline runs at **2.8 FPS at 320×240** (measured) and far below 1 FPS at 1080p. Real time needs 30. That gap is why this problem belongs on a GPU.
+At Full HD (1920×1080) each frame holds about 2 million pixels. A Gaussian Mixture Model with K=5 components updates 5 Gaussian distributions per pixel, so roughly 10 million distribution updates per frame, and a 15×15 Gaussian blur costs 225 multiply-accumulates per background pixel. In sequential Python the whole pipeline runs at a few FPS at 320×240 and far below 1 at 1080p — `bench_post.py --with-sequential` measures it (3632 ms/frame at 480p on a Colab T4 host, 0.3 FPS). Real time needs 30. That gap is why this problem belongs on a GPU.
 
 **Dataset / Input:**
 
 - **Dataset:** CDnet 2014, `baseline/highway` — 1700 frames at 320×240 of a fixed traffic camera, with per-frame hand-labelled ground truth.
-- **Source:** http://changedetection.net/ (public download, no registration for the 2014 dataset).
+- **Source:** http://changedetection.net/ — note that as of this writing the download host no longer resolves, so quality has to be scored against a local copy (`HIGHWAY_DIR=...`).
 - **Why this one:** it is publicly downloadable, and it ships pixel-accurate ground truth, a region of interest (`ROI.bmp`), and a scoring window (`temporalROI.txt` = frames 470–1700). That means every quality claim in this project is a number against a published label set, not an opinion about a screenshot.
 - **Scoring protocol:** F1 and IoU over frames 470–1700, counting only pixels whose ground truth is 0 or 255 inside the ROI. CDnet labels shadows as 50 and object boundaries as 170 and defines both as *don't care*; scoring them is the easiest way to publish a wrong number, so we exclude them explicitly.
 - **Benchmark sizes:** the same sequence upscaled to 854×480, 1280×720 and 1920×1080 for throughput measurement. Quality is always scored at the native 320×240, where the ground truth lives.
@@ -51,7 +51,7 @@ At Full HD (1920×1080) each frame holds about 2 million pixels. A Gaussian Mixt
 2. **Post-processing:** thresholding is per-pixel; the median filter is a 5×5 stencil with regular access, ideal for shared-memory tiling.
 3. **Gaussian blur:** a separable 2D stencil, the textbook tiling case.
 
-Two kernel launches for the model and the mask, and two for the blur — separable, so the horizontal and vertical passes cannot be fused without a grid-wide barrier. All with near-full occupancy on a T4 (2560 CUDA cores).
+Two kernel launches for the model and the mask, and two for the blur — separable, so the horizontal and vertical passes cannot be fused without a grid-wide barrier. All one thread per pixel on a T4 (2560 CUDA cores), which is enough threads to fill it several times over; we have not profiled achieved occupancy and do not claim a figure for it.
 
 ---
 
@@ -99,7 +99,7 @@ video frame (BGR uint8)
 [Kernel 2] threshold    → binary mask        ← per-pixel  (fused into K1 in v2)
 [Kernel 3] median 5×5   → refined mask       ← 5×5 stencil, shared-memory tiled
     ↓  D2H: one byte per pixel
-[Host]     flood fill   → filled mask        ← inherently sequential, see §3
+[Host]     flood fill   → filled mask        ← sequential in OpenCV; see §3
     ↑  H2D: one byte per pixel
 [Kernel 4] separable Gaussian blur, horizontal   ← 15-tap, Q8 fixed point
 [Kernel 5] vertical pass ⨝ composite         ← the select is free here
@@ -113,11 +113,11 @@ display / write
 
 ### 3. The Challenge
 
-1. **Large per-pixel state (memory bandwidth).** K=5 Gaussians per pixel, each with weight, 3-channel mean and variance: at 1080p that is about 31M float32 values, ~120 MB of model state read and written every frame. The kernel is bandwidth-bound, so the state is stored planar — `means[k][c][y][x]` — which makes adjacent threads read adjacent addresses and lets every access coalesce.
+1. **Large per-pixel state (memory bandwidth).** K=5 Gaussians per pixel, each with weight, 3-channel mean and variance: at 1080p that is about 31M float32 values, ~120 MB of model state read and written every frame. That arithmetic intensity is low enough that we expect the kernel to be bandwidth-bound rather than compute-bound — an expectation from the byte count, not a roofline measurement — so the state is stored planar, `means[k][c][y][x]`, which makes adjacent threads read adjacent addresses and lets every access coalesce.
 
-2. **Branch divergence in the update.** Matched / not-matched / replace-weakest sends threads in a warp down different paths. We measure the cost rather than assume it.
+2. **Branch divergence in the update.** Matched / not-matched / replace-weakest sends threads in a warp down different paths. We have not isolated its cost with a profiler, and say so rather than quoting a figure; what we can report is the end-to-end effect, which is in `RESULTS-T4.md`.
 
-3. **Not everything parallelises, and saying so is part of the work.** The hole fill is a scan-line flood fill. Its data-parallel equivalent, morphological reconstruction, needs one dilate per pixel of propagation distance — measured at **344 ms against 2.2 ms** for the sequential version at 1080p. Profiling says keep it on the CPU; the interesting result is the measurement, not the kernel.
+3. **Not everything parallelises usefully, and saying so is part of the work.** OpenCV implements the hole fill as a scan-line flood fill, which is sequential. A data-parallel formulation exists — morphological reconstruction by dilation — so the question is whether it is worth it, not whether it is possible. `bench_fill.py` implements both, checks they agree pixel-for-pixel, and times them: at 1080p the reconstruction needs **593 full-frame dilate passes and 748 ms against 2.6 ms**. Each pass is a grid-wide step, and no amount of GPU shortens the *sequence* of them. The interesting result is the measurement, not the kernel.
 
 4. **Host↔device transfer is the thing to optimise, not the kernel.** This is what motivates v1. In v0 the GPU computes the confidence map and copies it back so OpenCV can threshold it — float32, 4 bytes a pixel, 8 MB per frame at 1080p. Moving the threshold and median onto the device means one byte a pixel comes back instead, already refined.
 
@@ -202,9 +202,10 @@ Two harnesses, both in the repository and both runnable by a marker:
 
 Correctness is layered, and each layer is a file a marker can run:
 
-- `tests/test_parity.py` — sequential Python == Numba == v0 == v1 == v2, mask and model state; and agreement with `cv2.createBackgroundSubtractorMOG2`.
+- `tests/test_parity.py` — sequential Python == Numba == v0 == v1 == v2, compared on **every frame** for the mask and `bg_prob`, and on the model state (weights, means, variances, active-component counts) for all five; plus agreement with `cv2.createBackgroundSubtractorMOG2`, and a CuPy comparison that runs where CuPy is installed.
 - `tests/test_blur.py` — the Q8 blur, the colour conversion, the borders and the composite, each against OpenCV with **zero tolerance**; plus the device ingest against the host ingest end to end.
-- `tests/test_post_chain.py` — the threshold and median kernels against the host chain.
+- `tests/test_post_chain.py` — the threshold and median kernels against the host chain, plus a check that every kernel compiles on real hardware (deliberately skipped under CUDASIM: the simulator cannot fail it, which is the point).
+- `tests/test_scoring.py` — the CDnet protocol itself, on a fixture whose TP/FP/FN are countable by hand. Shadows (50), unknown boundaries (170) and out-of-ROI pixels must all be excluded; the fixture is built so that including them visibly changes the score.
 
 All three run without a GPU under `NUMBA_ENABLE_CUDASIM=1`.
 

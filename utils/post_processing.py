@@ -22,11 +22,14 @@ Three things that table decided, all of which had been assumed the other way:
   person and wrong for traffic: it swallows the road between cars, taking
   precision to 0.55 while recall goes to 1.0.
 
-`fill_holes` is the only step that stays on the host in the GPU pipeline. It is
-a scan-line flood fill and inherently sequential; the data-parallel equivalent
-is morphological reconstruction, which needs one dilate per pixel of
-propagation distance — measured at 344 ms against 2.2 ms for this at 1080p.
-Profiling says leave it on the CPU, so we do.
+`fill_holes` is the only step that stays on the host in the GPU pipeline.
+OpenCV implements it as a scan-line flood fill, which is sequential; the
+data-parallel formulation is morphological reconstruction by dilation, so the
+question is whether moving it is worth it rather than whether it is possible.
+`bench_fill.py` implements both, checks they agree pixel-for-pixel, and times
+them: at 1080p the reconstruction needs 593 full-frame dilate passes and 748 ms
+against 2.6 ms. Each pass is a grid-wide step, and no amount of GPU shortens
+the sequence of them. Profiling says leave it on the CPU, so we do.
 """
 import cv2
 import numpy as np

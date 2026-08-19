@@ -159,6 +159,41 @@ def test_the_model_state_agrees_and_not_just_the_mask():
 
 @requires_gpu
 @pytest.mark.parametrize("name", ["cuda", "cuda_v1", "cuda_v2"])
+def test_cuda_backends_match_the_cpu_reference_in_model_state_too(name):
+    """Masks agreeing is the weaker half of the claim.
+
+    Two backends can agree on every thresholded mask while their mixtures have
+    drifted apart, because the mask is a comparison against Tb and a small
+    difference in variance usually lands on the same side of it. The state is
+    where drift appears first, so it is the earlier warning — and until this
+    test existed, `proposal.md` claimed agreement "in mask and model state"
+    while only CPU-vs-Numba compared state at all.
+    """
+    from gmm_mask import GMM_Mask_CUDA, GMM_Mask_CUDA_v1, GMM_Mask_CUDA_v2
+    cls, kw = {
+        "cuda": (GMM_Mask_CUDA, {}),
+        "cuda_v1": (GMM_Mask_CUDA_v1, {"post": False}),
+        "cuda_v2": (GMM_Mask_CUDA_v2, {"post": False}),
+    }[name]
+    if cls is None:
+        pytest.skip("CUDA backends unavailable")
+
+    frames = traffic()
+    ref, _, _ = run(GMM_Mask_Numba, frames)
+    gpu, _, _ = run(cls, frames, **kw)      # run() calls sync_state() for us
+
+    for field in ("weights", "means", "vars"):
+        a, b = getattr(ref, field), getattr(gpu, field)
+        assert np.allclose(a, b, atol=1e-5), (
+            f"{name}: {field} drifted from the Numba reference "
+            f"(max |delta| {np.abs(a - b).max():.3g})")
+    assert np.array_equal(ref.modes, gpu.modes), (
+        f"{name}: the per-pixel active-component count diverged — that is the "
+        "complexity-reduction rule differing, not rounding")
+
+
+@requires_gpu
+@pytest.mark.parametrize("name", ["cuda", "cuda_v1", "cuda_v2"])
 def test_cuda_backends_match_the_cpu_reference(name):
     """With post-processing off, every CUDA backend is meant to be the same
     model, not a similar one. v1 and v2 are compared here with `post=False`
@@ -266,3 +301,44 @@ def test_gpu_background_image_syncs_device_state_first(name):
     bg = model.background_image()
     assert bg.shape == (H, W, 3) and bg.any()
     assert bg.mean() < 150
+
+
+def cupy_available():
+    try:
+        from gmm_mask import GMM_Mask_CuPy
+        if GMM_Mask_CuPy is None:
+            return False
+        import cupy as cp
+        return cp.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not cupy_available(), reason="cupy or a CUDA device is unavailable")
+def test_cupy_matches_the_cpu_reference():
+    """The backend that was silently a different algorithm.
+
+    `step_kernel_cp_v1.cu` had Zivkovic's complexity-reduction step commented
+    out — the component prune and the `nmodes` decrement both. So CuPy kept
+    components the other three backends delete, its mixtures diverged from
+    them over time, and nothing noticed because no test ever compared it: the
+    CUDA parity test parametrised over cuda/v1/v2 and stopped there, while
+    `main.py` and the README offered `--model cupy` as an ordinary choice.
+
+    CUDASIM cannot stand in here — CuPy compiles real NVRTC — so this test is
+    skipped everywhere except a machine with cupy and a device. It is the only
+    thing standing between that kernel and a silent regression.
+    """
+    from gmm_mask import GMM_Mask_CuPy
+
+    frames = traffic()
+    ref, m_ref, p_ref = run(GMM_Mask_Numba, frames)
+    cp_model, m_cp, p_cp = run(GMM_Mask_CuPy, frames)
+
+    assert_not_degenerate(m_ref[-1])
+    assert_all_frames_equal(m_ref, m_cp, "Numba vs CuPy")
+    for i, (a, b) in enumerate(zip(p_ref, p_cp)):
+        assert np.allclose(a, b, atol=1e-5), f"CuPy: bg_prob differs at frame {i}"
+    assert np.array_equal(ref.modes, cp_model.modes), (
+        "CuPy's active-component count diverged — the complexity-reduction "
+        "step is the thing that was commented out, so this is where it shows")

@@ -8,6 +8,13 @@ from .cpu.gmm_mask_cpu import GMM_Mask_CPU
 # touched, so probe here — that way `GMM_Mask_CUDA is None` actually means
 # "unavailable" instead of leaking a CudaSupportError out of a constructor.
 try:
+    import cupy as _cp
+    # Importing cupy succeeds without a usable driver; the failure only appears
+    # when a device is first touched. Probe here so `GMM_Mask_CuPy is None`
+    # actually means "unavailable", instead of letting a CUDARuntimeError leak
+    # out of a constructor after main.py has already promised the backend works.
+    if _cp.cuda.runtime.getDeviceCount() < 1:
+        raise ImportError("cupy is installed but no CUDA device is visible")
     from .gpu.gmm_mask_cupy import GMM_Mask_CuPy
 except Exception:                       # pragma: no cover - cupy missing
     GMM_Mask_CuPy = None

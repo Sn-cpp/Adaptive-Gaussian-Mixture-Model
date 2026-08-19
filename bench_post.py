@@ -11,9 +11,10 @@ The number that matters is not the kernel time — it is what crosses the bus. v
 uploads a planar float32 frame (12 bytes a pixel) and copies the confidence map
 back (4 bytes a pixel) so the host can threshold it. v1 and v2 upload the BGR
 frame (3 bytes a pixel), convert colour on the device, and return one byte a
-pixel of mask plus the finished composite. At 1080p that is 26.96 MB against
-16.58 MB per frame, and the bytes column below is computed from the array
-shapes rather than quoted from this docstring.
+pixel of mask plus the finished composite. The bytes column below is computed by
+`bytes_per_frame()` from the array shapes; do not quote a figure from this
+docstring, which is precisely how the number here came to be wrong once already
+— it omitted v0's bg_prob copy-back and read 26.96 MB instead of 35.25.
 
 **Correctness is measured separately from speed, and first.** The previous
 version of this file interleaved them: it timed three models, then compared a

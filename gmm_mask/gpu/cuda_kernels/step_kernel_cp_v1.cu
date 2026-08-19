@@ -173,9 +173,16 @@ extern "C" __global__ void step_gmm(
 
                     }
                 
+                    // Complexity reduction (Zivkovic 2004 sec. 3): a component whose
+                    // weight has decayed past the prune term is dropped, and K shrinks
+                    // per pixel. This was commented out, which made the CuPy backend a
+                    // different algorithm from the other three -- it kept components the
+                    // spec deletes, so its mixtures diverge from CPU/Numba/CUDA over
+                    // time. Restored to match them line for line; see
+                    // gmm_mask_cuda.py's mog2_step_kernel.
                     if (weight < -prune) {
-                        // weight = 0.0;
-                        // nmodes -= 1;
+                        weight = 0.0f;
+                        nmodes -= 1;
                     }
 
                     weights[(long long) ((mode-swap_count)*num_pixels + i)] = weight;

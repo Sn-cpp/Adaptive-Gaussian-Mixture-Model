@@ -290,8 +290,11 @@ def bgr2ycrcb_planar_kernel(src_bgr, dst, to_ycrcb):
     Exactly matters more than it might look. If the conversion drifted by a
     single grey level the model would see different input, and every quality
     number in the report would have been measured on the old pipeline. Because
-    it is exact, the mask is provably unchanged — and `--parity-vs` in
-    `eval_highway.py` is what proves it on all 1231 scored frames.
+    it is exact, the mask is provably unchanged — and that is checked rather
+    than asserted: `bench_t4.py --only equivalence` compares 120 frames at
+    1080p and finds zero differing pixels, and `eval_highway.py --parity-vs`
+    extends the same check to the 1231 scored CDnet frames where the dataset
+    is available.
 
     `to_ycrcb=False` passes BGR through, for `--colorspace bgr`.
     """

@@ -7,6 +7,20 @@ NumPy 2.0.2 · numba 0.60.0.
 Everything below was produced by running the repository at `dev/HD-car` on that machine.
 Timings are medians of interleaved passes; each pass rebuilds its model.
 
+Reproduce with:
+
+```bash
+pytest tests/ -q                              # §1, §2 correctness
+python bench_post.py --sizes 480 720 1080     # §3 the v0/v1/v2 table, §4 per-stage
+python bench_post.py --sizes 480 --with-sequential --skip-equivalence
+python bench_t4.py                            # §2 long equivalence, §3 Numba baseline, §5
+python bench_fill.py                          # the flood-fill comparison
+```
+
+`bench_t4.py` exists because four of the tables here were first produced by one-off cells typed
+into a Colab notebook. They are kept as committed code so this file is checkable rather than
+merely reported.
+
 ---
 
 ## 1. What running on real hardware found

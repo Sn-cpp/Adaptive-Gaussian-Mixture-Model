@@ -1,14 +1,6 @@
 import numpy as np
 
 
-INIT_VAR = np.float32(15.0)
-REINIT_WEIGHT = np.float32(0.01)
-MAX_COMPONENTS = 20
-
-# Legacy Stauffer-Grimson knob, kept because debug.py still passes it and every
-# model's step() accepts-and-ignores it.
-COMP_GEN_THRESHOLD = np.float32(9.0)
-
 # ------------------------------------------------------------------------------
 # MOG2 model parameters (Zivkovic 2004).
 # These mirror the OpenCV `BackgroundSubtractorMOG2` defaults exactly, so the
@@ -52,22 +44,3 @@ CLOSE_KSIZE_MAX = 61
 # Background blur
 BLUR_KSIZE = 15
 BLUR_SIGMA = 5.0
-
-# ── GrabCut label constants (OpenCV convention) ──────────────────────────────
-GC_BGD    = np.uint8(0)   # definite background
-GC_FGD    = np.uint8(1)   # definite foreground (unused — no scribbles)
-GC_PR_BGD = np.uint8(2)   # probable background
-GC_PR_FGD = np.uint8(3)   # probable foreground
-
-# ── Pipeline hyper-parameters ─────────────────────────────────────────────────
-GAMMA          = np.float64(50.0)
-LAM_FACTOR     = np.float64(9.0)
-BG_HARD_THRESH = np.float32(0.70)   # bg_prob ≥ this → GC_PR_BGD
-FG_HARD_THRESH = np.float32(0.20)   # bg_prob ≤ this → GC_PR_FGD
-
-PUSH_RELABEL_MAX_ITER     = 200
-PUSH_RELABEL_RELABEL_FREQ = 25
-
-MORPH_CLOSE_RADIUS = 3
-MORPH_OPEN_RADIUS  = 2
-BLUR_KSIZE_DEFAULT = 15

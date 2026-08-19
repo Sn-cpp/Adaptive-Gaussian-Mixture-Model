@@ -15,9 +15,10 @@ with OpenCV rather than an approximation of it.
 **The threshold is free.** It reads a value the MOG2 kernel already wrote and
 writes one byte. In `v2` it disappears entirely into that kernel's epilogue.
 
-`fill_holes` stays on the host: it is a scan-line flood fill, and its
-data-parallel equivalent (morphological reconstruction) needs one dilate per
-pixel of propagation distance — 344 ms against 2.2 ms at 1080p. Profiling
+`fill_holes` stays on the host: OpenCV does it as a scan-line flood fill, and
+the data-parallel formulation (morphological reconstruction) needs one dilate
+per pixel of propagation distance — 593 passes and 748 ms against 2.6 ms at
+1080p, measured by `bench_fill.py`, which also checks the two agree. Profiling
 says leave it, so it is left.
 """
 import numpy as np
