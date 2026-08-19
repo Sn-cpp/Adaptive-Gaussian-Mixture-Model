@@ -172,6 +172,21 @@ def assert_not_degenerate(mask):
         "mask is uniform — this comparison would pass on two broken backends")
 
 
+def assert_some_frame_has_foreground(masks, label=""):
+    """The sequence-level version, for fixtures where foreground is transient.
+
+    Naming a specific frame index is a trap: `transient()` runs at a fixed
+    alpha of 0.2, which absorbs the object into the background within a frame
+    of it appearing, so only frame 2 carries foreground at all. Asserting on
+    frame 3 fails for a reason that has nothing to do with the backends being
+    compared — as it did, the first time this ran on hardware.
+    """
+    best = max(masks, key=lambda m: int((m == 255).sum()))
+    assert (best == 255).any() and (best == 0).any(), (
+        f"{label}: no frame in the sequence has both foreground and background "
+        "— this comparison would pass on two broken backends")
+
+
 # ── the specification against the fast CPU backend ────────────────────────────
 
 def test_numba_matches_the_sequential_specification():
@@ -386,7 +401,7 @@ def test_cupy_matches_the_cpu_reference_including_the_prune():
 
     cp_model, m_cp, cp_drops = run_and_watch_pruning(GMM_Mask_CuPy, frames)
 
-    assert_not_degenerate(m_ref[3])
+    assert_some_frame_has_foreground(m_ref, "CuPy fixture")
     assert_all_frames_equal(m_ref, m_cp, "Numba vs CuPy")
     assert cp_drops == drops, (
         f"CuPy pruned {cp_drops} components where the reference pruned "
@@ -420,6 +435,7 @@ def test_cuda_backends_agree_on_the_prune_branch_too(name):
     ref, m_ref, drops = run_and_watch_pruning(GMM_Mask_Numba, frames)
     assert drops > 0, "fixture does not reach the prune branch"
 
+    assert_some_frame_has_foreground(m_ref, f"{name} fixture")
     gpu, m_gpu, gpu_drops = run_and_watch_pruning(cls, frames, **kw)
     assert_all_frames_equal(m_ref, m_gpu, f"Numba vs {name} (pruning sequence)")
     assert gpu_drops == drops, (
