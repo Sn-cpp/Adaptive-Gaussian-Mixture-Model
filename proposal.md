@@ -117,7 +117,7 @@ display / write
 
 2. **Branch divergence in the update.** Matched / not-matched / replace-weakest sends threads in a warp down different paths. We have not isolated its cost with a profiler, and say so rather than quoting a figure; what we can report is the end-to-end effect, which is in `RESULTS-T4.md`.
 
-3. **Not everything parallelises usefully, and saying so is part of the work.** OpenCV implements the hole fill as a scan-line flood fill, which is sequential. A data-parallel formulation exists — morphological reconstruction by dilation — so the question is whether it is worth it, not whether it is possible. `bench_fill.py` implements both, checks they agree pixel-for-pixel, and times them: at 1080p the reconstruction needs **593 full-frame dilate passes and 748 ms against 2.6 ms**. Each pass is a grid-wide step, and no amount of GPU shortens the *sequence* of them. The interesting result is the measurement, not the kernel.
+3. **Not everything parallelises usefully, and saying so is part of the work.** OpenCV implements the hole fill as a scan-line flood fill, which is sequential. A data-parallel formulation exists — morphological reconstruction by dilation — so the question is whether it is worth it, not whether it is possible. `bench_fill.py` implements both, checks they agree pixel-for-pixel, and times them: at 1080p the reconstruction needs **593 full-frame dilate passes**, and the wall-clock ratio is 112× on one host and 287× on another *while the pass count is identical on both*. That is the durable result — milliseconds belong to the machine, the pass count belongs to the algorithm. Each pass is a grid-wide step, and no amount of GPU shortens the *sequence* of them.
 
 4. **Host↔device transfer is the thing to optimise, not the kernel.** This is what motivates v1. In v0 the GPU computes the confidence map and copies it back so OpenCV can threshold it — float32, 4 bytes a pixel, 8 MB per frame at 1080p. Moving the threshold and median onto the device means one byte a pixel comes back instead, already refined.
 
@@ -178,12 +178,15 @@ display / write
   Measured bus traffic per frame at 1080p, computed by `bench_post.py` from the array shapes
   rather than quoted: **35.25 MB → 16.59 MB, a 2.12× reduction.**
 
-  Measured on a Colab T4 (full numbers in `RESULTS-T4.md`): frame ingest **14.75 ms → 1.54 ms**
-  and blur+composite **13.35 ms → 1.49 ms** at 1080p, about **25 ms/frame** in total. Two thirds
-  of the ingest saving is host work deleted rather than kernel speed — the conversion kernel
-  itself costs 0.151 ms. We also recorded a prediction that turned out wrong: shared-memory
-  tiling was expected to barely beat the naive blur because L2 should already serve the row
-  reuse, and it wins **2.37×**, identically at 480p, 720p and 1080p.
+  Measured on a Colab T4 (full numbers and reproduction commands in `RESULTS-T4.md`):
+  **88.8 FPS at 1080p**, 4.89× over v0 and 10.25× over Numba CPU, with v0, v1 and v2 producing
+  byte-identical masks *and* composites over 1.99 billion pixels. Frame ingest goes
+  **23.21 ms → 1.65 ms** and blur+composite **13.74 ms → 1.55 ms**; three quarters of the
+  ingest saving is host work deleted rather than kernel speed, since the conversion kernel
+  itself costs 0.184 ms. Two results worth stating because they were predicted wrongly:
+  shared-memory tiling was expected to barely beat the naive blur, and wins **2.36×** at every
+  resolution under two measurement protocols; and after the change the largest single stage is
+  the host flood fill at 36.7%, not any kernel.
 
   The median is worth a note: on a binary mask a median **is a majority vote**, so the kernel counts instead of sorting, and is bit-exact with `cv2.medianBlur` rather than an approximation of it. The threshold fuses because it reads and writes one pixel; the median does not, because it needs its neighbours' post-threshold values and CUDA has no grid-wide barrier — fusing it would be a race that mostly does not show up in testing.
 

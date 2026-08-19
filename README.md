@@ -9,8 +9,10 @@ Scored on **CDnet 2014 `baseline/highway`**, frames 470–1700, CDnet protocol
 commit `b2523ba`; the host chain is unchanged since, but CDnet's download host no
 longer resolves, so re-running needs a local copy (`HIGHWAY_DIR=...`).
 
-Measured on a Colab T4: **86.5 FPS at 1080p**, 5.72× over the v0 baseline and
-10.74× over Numba CPU. Full numbers and method in [RESULTS-T4.md](RESULTS-T4.md).
+Measured on a Colab T4: **88.8 FPS at 1080p**, 4.89× over the v0 baseline and
+10.25× over Numba CPU, with all four backends producing byte-identical masks and
+composites over 1.99 billion pixels. Full numbers and method in
+[RESULTS-T4.md](RESULTS-T4.md).
 
 ## Quick start
 
@@ -59,7 +61,11 @@ tests/                      parity, blur, post chain
 flood fill; the data-parallel formulation (morphological reconstruction) needs one
 dilate per pixel of propagation distance. `bench_fill.py` implements both, checks
 they agree pixel-for-pixel, and times them: at 1080p that is **593 full-frame
-passes and 748 ms, against 2.6 ms**. Knowing which stage not to move is a result.
+passes**, and the wall-clock ratio runs 112–287× depending on the host. The pass
+count is identical on every machine tried, which is the durable half of the
+result — each pass is a grid-wide barrier, and a CUDA dilate a hundred times
+faster still needs 593 of them in sequence. Knowing which stage not to move is a
+result.
 
 ## Correctness
 
