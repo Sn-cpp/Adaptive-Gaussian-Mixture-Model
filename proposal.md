@@ -35,7 +35,7 @@
 **Problem:**
 Separate moving objects from a static background in a video stream, then blur the background while keeping the objects sharp. This is the core of automated traffic monitoring — counting vehicles, flagging stopped cars, anonymising a scene before storage — and the segmentation step is what everything downstream depends on.
 
-At Full HD (1920×1080) each frame holds about 2 million pixels. A Gaussian Mixture Model with K=5 components updates 5 Gaussian distributions per pixel, so roughly 10 million distribution updates per frame, and a 15×15 Gaussian blur costs 225 multiply-accumulates per background pixel. In sequential Python the whole pipeline runs at a few FPS at 320×240 and far below 1 at 1080p — `bench_post.py --with-sequential` measures it (3632 ms/frame at 480p on a Colab T4 host, 0.3 FPS). Real time needs 30. That gap is why this problem belongs on a GPU.
+At Full HD (1920×1080) each frame holds about 2 million pixels. A Gaussian Mixture Model with up to K=5 components per pixel holds 25 float32 of state per pixel — 207 MB at 1080p — and a 15×15 Gaussian blur costs 30 multiply-accumulates per background pixel once it is separated into two passes (225 if it is not). In sequential Python the whole pipeline runs far below 1 FPS — `bench_post.py --with-sequential` measures **3035 ms/frame at 480p** on a Colab T4 host, 0.3 FPS. Real time needs 30. That gap is why this problem belongs on a GPU.
 
 **Dataset / Input:**
 
@@ -113,19 +113,19 @@ display / write
 
 ### 3. The Challenge
 
-1. **Large per-pixel state (memory bandwidth).** K=5 Gaussians per pixel, each with a weight, a 3-channel mean and a variance — 5 + 15 + 5 = **25 float32 per pixel**. At 1080p that is 51.8M values, **207 MB** of model state read and written every frame. (An earlier draft said 31M/120 MB, having counted the means and forgotten the weights and variances; the arrays are `means (K,C,H,W)`, `vars (K,H,W)`, `weights (K,H,W)` and the figure above is their `nbytes`.) That arithmetic intensity is low enough that we expect the kernel to be bandwidth-bound rather than compute-bound — an expectation from the byte count, not a roofline measurement — so the state is stored planar, `means[k][c][y][x]`, which makes adjacent threads read adjacent addresses and lets every access coalesce.
+1. **Large per-pixel state (memory bandwidth).** K=5 Gaussians per pixel, each with a weight, a 3-channel mean and a variance — 5 + 15 + 5 = **25 float32 per pixel**. At 1080p that is 51.8M values, **207 MB** of model state resident and touched every frame. (Resident: the kernel loops over each pixel's *active* components, so it does not rewrite all of it.) (An earlier draft said 31M/120 MB, having counted the means and forgotten the weights and variances; the arrays are `means (K,C,H,W)`, `vars (K,H,W)`, `weights (K,H,W)` and the figure above is their `nbytes`.) That arithmetic intensity is low enough that we expect the kernel to be bandwidth-bound rather than compute-bound — an expectation from the byte count, not a roofline measurement — so the state is stored planar, `means[k][c][y][x]`, which makes adjacent threads read adjacent addresses and lets every access coalesce.
 
 2. **Branch divergence in the update.** Matched / not-matched / replace-weakest sends threads in a warp down different paths. We have not isolated its cost with a profiler, and say so rather than quoting a figure; what we can report is the end-to-end effect, which is in `RESULTS-T4.md`.
 
 3. **Not everything parallelises usefully, and saying so is part of the work.** OpenCV implements the hole fill as a scan-line flood fill, which is sequential. A data-parallel formulation exists — morphological reconstruction by dilation — so the question is whether it is worth it, not whether it is possible. `bench_fill.py` implements both, checks they agree pixel-for-pixel, and times them: at 1080p the reconstruction needs **593 full-frame dilate passes**, and the wall-clock ratio is 112× on one host and 287× on another *while the pass count is identical on both*. That is the durable result — milliseconds belong to the machine, the pass count belongs to the algorithm. Each pass is a grid-wide step, and no amount of GPU shortens the *sequence* of them.
 
-4. **Host↔device transfer is the thing to optimise, not the kernel.** This is what motivates v1. In v0 the GPU computes the confidence map and copies it back so OpenCV can threshold it — float32, 4 bytes a pixel, 8 MB per frame at 1080p. Moving the threshold and median onto the device means one byte a pixel comes back instead, already refined.
+4. **Host-side work and host↔device transfer are the things to optimise, not the kernel.** This is what motivates v1. In v0 the GPU computes the confidence map and copies it back so OpenCV can threshold it — float32, 4 bytes a pixel, 8 MB per frame at 1080p. Moving the threshold and median onto the device means one byte a pixel comes back instead, already refined.
 
 5. **A mask that scores well can still be wrong.** A closing wide enough to bridge a gap in one car also bridges the road between two cars, and the summary barely notices: in the scored table a 15×15 closing moves F1 by 0.006 while precision falls 0.9863 → 0.9634. Every candidate is looked at, not just scored. (The specific two-cars-merged observation was an eyeball check during that run; it is not reproducible from this checkout.)
 
 6. **Split development environment.** macOS on Apple Silicon has no CUDA. We develop and verify on the CPU locally, run the CUDA kernels under `NUMBA_ENABLE_CUDASIM=1` for correctness, and measure on a Colab T4.
 
-**What we hope to learn:** how to find the real bottleneck in a GPU pipeline (it was the transfer, not the arithmetic), how to keep four implementations of one algorithm bit-identical, and when a stage should *not* be moved to the GPU.
+**What we hope to learn:** how to find the real bottleneck in a GPU pipeline (it was the host, not the arithmetic — 76% of the ingest saving was host work deleted, only 17% the smaller upload), how to keep four implementations of one algorithm bit-identical, and when a stage should *not* be moved to the GPU.
 
 ---
 
@@ -180,12 +180,12 @@ display / write
 
   Measured on a Colab T4 (full numbers and reproduction commands in `RESULTS-T4.md`):
   **88.8 FPS at 1080p**, 4.89× over v0 and 10.25× over Numba CPU, with v0, v1 and v2 producing
-  byte-identical masks *and* composites over 1.99 billion pixels. Frame ingest goes
+  byte-identical masks *and* composites over 1.49 billion pixel positions. Frame ingest goes
   **23.21 ms → 1.65 ms** and blur+composite **13.74 ms → 1.55 ms**; three quarters of the
   ingest saving is host work deleted rather than kernel speed, since the conversion kernel
   itself costs 0.184 ms. Two results worth stating because they were predicted wrongly:
-  shared-memory tiling was expected to barely beat the naive blur, and wins **2.36×** at every
-  resolution under two measurement protocols; and after the change the largest single stage is
+  shared-memory tiling was expected to barely beat the naive blur, and wins **2.36×** (2.36 /
+  2.36 / 2.37 across the three resolutions, and again under a second protocol); and after the change the largest single stage is
   the host flood fill at 36.7%, not any kernel.
 
   The median is worth a note: on a binary mask a median **is a majority vote**, so the kernel counts instead of sorting, and is bit-exact with `cv2.medianBlur` rather than an approximation of it. The threshold fuses because it reads and writes one pixel; the median does not, because it needs its neighbours' post-threshold values and CUDA has no grid-wide barrier — fusing it would be a race that mostly does not show up in testing.
@@ -201,7 +201,7 @@ Two harnesses, both in the repository and both runnable by a marker:
 - `eval_highway.py` — F1, IoU, precision, recall and empty-frame count for every candidate mask chain, on frames 470–1700 with the CDnet protocol.
 - `bench_post.py` — per-stage timing for v0/v1/v2 at each resolution, with interleaved repeats, and an equality check asserting that v1 and v2 produce the *same* mask as v0. A speedup that changes the output is not a speedup.
 
-- `eval_highway.py --model X --parity-vs Y` — per-frame `np.array_equal` between two backends over the whole scored window. This is the equivalence gate, and an unchanged F1 is deliberately *not* accepted as one: F1 is a four-decimal summary of two million pixels and a mask can move by hundreds of them without shifting it.
+- `eval_highway.py --model X --parity-vs Y` — per-frame `np.array_equal` between two backends over the whole scored window. This is the equivalence gate, and an unchanged F1 is deliberately *not* accepted as one: F1 is a four-decimal summary of every scored pixel in 1231 frames and a mask can move by hundreds of them without shifting it.
 
 Correctness is layered, and each layer is a file a marker can run:
 

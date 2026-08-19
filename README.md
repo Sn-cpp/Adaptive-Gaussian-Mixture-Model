@@ -11,7 +11,7 @@ longer resolves, so re-running needs a local copy (`HIGHWAY_DIR=...`).
 
 Measured on a Colab T4: **88.8 FPS at 1080p**, 4.89× over the v0 baseline and
 10.25× over Numba CPU, with all four backends producing byte-identical masks and
-composites over 1.99 billion pixels. Full numbers and method in
+composites over 1.49 billion pixel positions. Full numbers and method in
 [RESULTS-T4.md](RESULTS-T4.md).
 
 ## Quick start
@@ -69,7 +69,7 @@ result.
 
 ## Correctness
 
-Every equivalence is a test, and every test runs without a GPU:
+Every equivalence is a test, and all but one run without a GPU:
 
 ```bash
 pytest tests/ -q                              # the host-side claims

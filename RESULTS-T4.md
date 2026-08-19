@@ -1,6 +1,11 @@
 # Measured on a Colab Tesla T4
 
-**Commit `a50eb79`.** Tesla T4 (15360 MiB, compute 7.5, driver 580.82.07, CUDA driver 13.0) ·
+**Commit `a6c0285`.**  \
+*(The `dev/HD-car` history was rewritten after these measurements were taken, which renamed
+every commit on that branch. `a6c0285` is the surviving name for the commit this file was
+measured at; the hash it originally quoted no longer resolves and has been removed rather than
+left as a dead citation. Commits from before the branch diverged — `b2523ba`, for instance — are
+untouched.)* Tesla T4 (15360 MiB, compute 7.5, driver 580.82.07, CUDA driver 13.0) ·
 Linux x86_64 · Python 3.12.13 · **OpenCV 4.14.0** · NumPy 2.0.2 · numba 0.60.0 · cupy present.
 
 Everything here is produced by committed code:
@@ -79,7 +84,9 @@ the early return. It ran on hardware and terminated.
 | v1 GPU post + blur | 0 | 0 | IDENTICAL |
 | v2 fused + tiled | 0 | 0 | IDENTICAL |
 
-**1 990 656 000 pixels compared, zero differences.** Foreground in 120/120 frames.
+**1 492 992 000 pixel positions compared against the reference, zero differences** — three
+non-reference backends × 120 frames × 2 073 600 px × (mask + composite). Foreground in 120/120
+frames. The sweep runs on synthetic frames; the CDnet parity run still needs the dataset.
 
 ---
 
@@ -219,12 +226,17 @@ ever be worthwhile".
 | bottleneck after the change | host `fill_holes`, not the blur | **confirmed, 36.7%** |
 | bus traffic reduction @1080p | −38.5% | **−52.9%** (the estimate omitted v0's `bg_prob` D2H) |
 
-**The tiling prediction was wrong, and cleanly so.** The reasoning was that L2 already serves
-row-strided reuse, so a shared tile would buy little. It buys 2.36×, at three resolutions, under
-two different measurement protocols. The tiled kernels earn their complexity.
+**Five of the six missed; only the bottleneck call held.** They did not miss the same way, and
+lumping them together would hide the interesting half:
 
-Four of the six predictions were wrong, all in the same direction: the host was more expensive
-and the GPU less free than assumed. That is the project's actual finding.
+- **Three underestimated the host and the bus** — the host blur, the ingest saving and the bus
+  reduction were all larger than predicted. This is why the optimisation target became the host
+  rather than the arithmetic.
+- **One underestimated what a GPU kernel costs** — the blur kernels were predicted at
+  0.2–0.4 ms and measured at 1.55 ms.
+- **One went the other way entirely** — shared-memory tiling was expected to barely beat the
+  naive blur and won **2.36×** (2.36 / 2.36 / 2.37 interleaved; 2.37 / 2.36 / 2.37 batched). Here
+  the GPU did *better* than predicted, and saying so is the point of keeping the table.
 
 ---
 
