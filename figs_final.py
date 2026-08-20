@@ -187,6 +187,19 @@ def _sequence(n, size=(320, 240)):
     `bench_post.py` and, for quality, from CDnet.
     """
     hw = os.environ.get("HIGHWAY_DIR", os.path.join(REPO, "highway"))
+    if not os.path.isdir(os.path.join(hw, "input")):
+        # the team's Hugging Face mirror; anonymous HTTPS, ~27 MB
+        try:
+            import urllib.request, zipfile, socket
+            socket.setdefaulttimeout(30)
+            url = ("https://huggingface.co/datasets/haiduonghuynhle/"
+                   "changedetection-2012-highway/resolve/main/highway.zip")
+            zp = os.path.join(REPO, "highway.zip")
+            urllib.request.urlretrieve(url, zp)
+            with zipfile.ZipFile(zp) as z:
+                z.extractall(REPO)
+        except Exception:
+            pass
     if os.path.isdir(os.path.join(hw, "input")):
         out = [cv2.imread(os.path.join(hw, "input", f"in{i:06d}.jpg"))
                for i in range(1, n + 1)]

@@ -309,16 +309,18 @@ lumping them together would hide the interesting half:
 
 ## 9. Not measured here
 
-**F1 / IoU on CDnet.** The dataset host no longer resolves — `wordpress-jodoin.dmi.usherb.ca`
-fails DNS and `changedetection.net` serves HTML — from either the Colab VM or a local machine.
-The quoted **F1 0.9843 / IoU 0.9691** were measured at commit `b2523ba`; the host chain in
-`utils/post_processing.refine_mask` is unchanged since, and `tests/test_scoring.py` pins the
-scoring protocol itself, but the number has not been re-run. With a local copy:
+**F1 / IoU on CDnet — now re-measured.** The original dataset hosts are offline, so the team
+mirrors `baseline/highway` on Hugging Face
+(`haiduonghuynhle/changedetection-2012-highway`, sha256 in the record file). Re-run at the
+current HEAD, full 470–1700 window: the shipping chain reproduces
+**F1 0.9843 / IoU 0.9691 / P 0.9863 / R 0.9823, 0 empty frames — digit for digit** the figures
+first measured at `b2523ba`, as expected since the host chain never changed. So do the rejected
+chains quoted in the report (BGR 0.8272; CLOSE precision 0.9634; contour 0.5541). Raw output:
+`benchmarks/records/eval_highway_full.txt`.
 
-```bash
-HIGHWAY_DIR=/path/to/highway python eval_highway.py --colorspace both
-HIGHWAY_DIR=/path/to/highway python eval_highway.py --model cuda_v2 --parity-vs numba
-```
+Still open on this axis: the GPU-backend parity sweep over the real 1231 frames
+(`eval_highway.py --model cuda_v2 --parity-vs numba`) needs a GPU session with the dataset
+present.
 
 **The 81.8%-on-host profile** quoted in the notebook is a one-off from earlier in the project,
 kept because it is what motivated v1. §4 is the version this repository reproduces.

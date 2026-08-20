@@ -1,0 +1,46 @@
+# Raw output of `HIGHWAY_DIR=highway python eval_highway.py --colorspace both`
+#
+# Machine : Apple M-series host, Python 3.12, OpenCV 5.0, numba 0.61 (CPU model)
+# Dataset : highway.zip, sha256
+#           44878b640a1c8c9e9a5fb5c447c596c7d21ccdf032dfc3f869313375fb1b210c
+#           from https://huggingface.co/datasets/haiduonghuynhle/changedetection-2012-highway
+#           (the team's mirror of CDnet baseline/highway; original hosts are offline)
+# Commit  : the tree this file is committed in — that is the point of the file.
+#
+# The shipping chain (YCrCb, bg_prob + median5 + fill) reproduces the
+# previously quoted figures digit for digit: F1 0.9843, IoU 0.9691,
+# P 0.9863, R 0.9823, 0 empty frames. So do the rejected chains quoted in the
+# report: BGR 0.8272, CLOSE precision 0.9634, contour 0.5541.
+
+
+highway 470-1700 (1231 frames), model input = bgr
+  chain                                     F1     IoU       P       R  empty    ms/f
+  mask + median5 + fill                 0.9575  0.9185  0.9557  0.9593      0    0.24
+  mask + median5                        0.9520  0.9085  0.9561  0.9480      0    0.11
+  raw mask                              0.8626  0.7584  0.8404  0.8860      0    0.06
+  bg_prob + median5                     0.8304  0.7100  0.7173  0.9860      0    0.14
+  bg_prob + median5 + fill              0.8272  0.7054  0.7104  0.9901      0    0.26
+  sobel gate + median3 + fill           0.8216  0.6973  0.7035  0.9876      0    0.20
+  sobel gate + median3                  0.8212  0.6967  0.7113  0.9714      0    0.11
+  Tin 1fe1c5e, no largest-blob step     0.7504  0.6005  0.6007  0.9996      0    0.74
+  bg_prob + median5 + close15 + fill    0.7424  0.5903  0.5915  0.9966      0    0.55
+  sobel gate 0.4                        0.7362  0.5825  0.6084  0.9320      0    0.07
+  bg_prob                               0.7155  0.5571  0.5786  0.9375      0    0.07
+  Tin 1fe1c5e: gate.2 + med5 + contour+fill  0.6518  0.4834  0.6245  0.6815      0    1.14
+  Tin dd40d92: gate.4 + med3 + contour  0.4270  0.2714  0.2714  0.9999      0    0.74
+
+highway 470-1700 (1231 frames), model input = ycrcb
+  chain                                     F1     IoU       P       R  empty    ms/f
+  bg_prob + median5 + fill              0.9843  0.9691  0.9863  0.9823      0    0.24
+  bg_prob + median5                     0.9805  0.9617  0.9863  0.9748      0    0.14
+  bg_prob + median5 + close15 + fill    0.9782  0.9572  0.9634  0.9934      0    0.55
+  sobel gate + median3 + fill           0.9764  0.9538  0.9744  0.9783      0    0.18
+  sobel gate + median3                  0.9639  0.9303  0.9739  0.9541      0    0.11
+  mask + median5 + fill                 0.9111  0.8367  0.9971  0.8388      0    0.24
+  sobel gate 0.4                        0.9102  0.8351  0.9108  0.9095      0    0.07
+  bg_prob                               0.9098  0.8345  0.9041  0.9155      0    0.07
+  mask + median5                        0.8959  0.8115  0.9970  0.8135      0    0.11
+  raw mask                              0.8472  0.7349  0.9445  0.7681      0    0.05
+  Tin 1fe1c5e, no largest-blob step     0.8139  0.6863  0.6866  0.9992      0    0.74
+  Tin dd40d92: gate.4 + med3 + contour  0.7131  0.5541  0.5541  0.9999      0    0.71
+  Tin 1fe1c5e: gate.2 + med5 + contour+fill  0.6936  0.5309  0.7191  0.6699      0    1.12

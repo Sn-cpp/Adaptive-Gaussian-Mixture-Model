@@ -4,10 +4,11 @@ CSC14116 Applied Parallel Programming, HCMUS. Background subtraction with MOG2
 (Zivkovic 2004) and background blur on traffic video, from a sequential Python
 specification through Numba to CUDA.
 
-Scored on **CDnet 2014 `baseline/highway`**, frames 470–1700, CDnet protocol
-(don't-care pixels excluded). Best chain: **F1 0.9843, IoU 0.9691** — measured at
-commit `b2523ba`; the host chain is unchanged since, but CDnet's download host no
-longer resolves, so re-running needs a local copy (`HIGHWAY_DIR=...`).
+Scored on **CDnet `baseline/highway`**, frames 470–1700, CDnet protocol
+(don't-care pixels excluded). Best chain: **F1 0.9843, IoU 0.9691** —
+**re-measured at the current HEAD** from the team's dataset mirror, reproducing
+the original `b2523ba` figures digit for digit. Raw output:
+[`benchmarks/records/eval_highway_full.txt`](benchmarks/records/eval_highway_full.txt).
 
 Measured on a Colab T4: **88.8 FPS at 1080p**, 4.89× over the v0 baseline and
 10.25× over Numba CPU, with all four backends producing byte-identical masks and
@@ -105,15 +106,18 @@ python eval_highway.py --model cuda_v2 --parity-vs numba
 
 ### Grading access to the dataset
 
-CDnet's download host stopped resolving mid-project (`wordpress-jodoin.dmi.usherb.ca` fails DNS;
-`changedetection.net` serves HTML). Every quality figure therefore carries the commit it was
-measured at, `tests/test_scoring.py` pins the scoring protocol itself on a hand-checkable
-fixture, and every pipeline — including `src/cpu_baseline.py` and the notebook — runs
-end-to-end on labelled synthetic frames with no download. With any local copy:
+CDnet's original hosts went offline mid-project, so the team mirrors the sequence on
+Hugging Face — anonymous HTTPS, CDnet citation on the card, sha256 recorded in
+`benchmarks/records/eval_highway_full.txt`:
 
 ```bash
-HIGHWAY_DIR=/path/to/highway python eval_highway.py --colorspace both
+curl -LO https://huggingface.co/datasets/haiduonghuynhle/changedetection-2012-highway/resolve/main/highway.zip
+unzip highway.zip && HIGHWAY_DIR=highway python eval_highway.py --colorspace both
 ```
+
+The notebook downloads it from the same mirror automatically. `tests/test_scoring.py` pins the
+scoring protocol on a hand-checkable fixture, and every pipeline still runs end-to-end on
+labelled synthetic frames when the network is absent.
 
 ### What "bit-exact with OpenCV" means here, precisely
 

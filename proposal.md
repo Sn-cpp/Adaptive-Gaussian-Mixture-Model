@@ -252,7 +252,9 @@ The blur is a stronger claim than the model, and worth separating: it is integer
 
 1. **The dataset host disappears.** It did — the CDnet download host
    (`wordpress-jodoin.dmi.usherb.ca`) stopped resolving mid-project, and `changedetection.net`
-   now serves only an HTML landing page.
+   now serves only an HTML landing page. Resolved: the team mirrors the sequence on Hugging
+   Face, and the headline figures were re-measured at HEAD from that mirror, reproducing the
+   originals digit for digit (`benchmarks/records/eval_highway_full.txt`).
    Mitigation, applied: every quality figure carries the commit it was measured at,
    `tests/test_scoring.py` pins the CDnet protocol itself on a hand-checkable fixture, every
    pipeline runs end-to-end on synthetic frames with the source labelled, and `eval_highway.py`
