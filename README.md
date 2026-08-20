@@ -57,9 +57,21 @@ tests/                      parity, blur, post chain
 | **v1** | colour convert, threshold, median, blur, composite as kernels; flood fill on host | 16.59 MB/frame |
 | **v2** | threshold fused into the model kernel's epilogue; median and blur shared-memory tiled | 16.59 MB/frame |
 
-`fill_holes` stays on the host deliberately. OpenCV implements it as a scan-line
-flood fill; the data-parallel formulation (morphological reconstruction) needs one
-dilate per pixel of propagation distance. `bench_fill.py` implements both, checks
+## The course's optimization ladder, climbed
+
+| Course ladder (Project Description §1.2) | In this project |
+|---|---|
+| Level 0 — CPU | `GMM_Mask_CPU` (pure NumPy spec; `src/cpu_baseline.py` is the template entry point), plus Numba CPU as the honest compiled baseline |
+| Level 1 — naive GPU port, "correct, not fast" | v0: the model kernel, one thread per pixel |
+| Level 2 — memory | planar coalesced state (`means[k][c][y][x]`); 3 B/px ingest; shared-memory tiling for median and blur; bus 35.25 → 16.59 MB/frame. (The Q8 integer blur itself is the correctness story — it ships in v1 and v2 alike.) |
+| Level 3 — compute | threshold fused into the model kernel's epilogue |
+| Level 4 — optional | CUDA streams: identified by the per-stage profile as the next step, **not claimed** |
+
+`fill_holes` stays on the host deliberately — the course's own Partial GPU
+Principle: *"identifying the one or two operations that dominate runtime and
+accelerating those — not rewriting an entire application."* OpenCV implements it
+as a scan-line flood fill; the data-parallel formulation (morphological
+reconstruction) needs one dilate per pixel of propagation distance. `bench_fill.py` implements both, checks
 they agree pixel-for-pixel, and times them: at 1080p that is **593 full-frame
 passes**, and the wall-clock ratio runs 112–287× depending on the host. The pass
 count is identical on every machine tried, which is the durable half of the
@@ -89,6 +101,18 @@ not an unchanged F1:
 
 ```bash
 python eval_highway.py --model cuda_v2 --parity-vs numba
+```
+
+### Grading access to the dataset
+
+CDnet's download host stopped resolving mid-project (`wordpress-jodoin.dmi.usherb.ca` fails DNS;
+`changedetection.net` serves HTML). Every quality figure therefore carries the commit it was
+measured at, `tests/test_scoring.py` pins the scoring protocol itself on a hand-checkable
+fixture, and every pipeline — including `src/cpu_baseline.py` and the notebook — runs
+end-to-end on labelled synthetic frames with no download. With any local copy:
+
+```bash
+HIGHWAY_DIR=/path/to/highway python eval_highway.py --colorspace both
 ```
 
 ### What "bit-exact with OpenCV" means here, precisely

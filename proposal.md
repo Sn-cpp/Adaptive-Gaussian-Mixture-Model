@@ -144,6 +144,29 @@ display / write
 
 ---
 
+### 4b. Measured CPU Baseline
+
+`python src/cpu_baseline.py` — the course-template entry point, runnable with no GPU and no
+dataset. Output pasted verbatim (Apple M-series host, Python 3.12, OpenCV 5.0):
+
+```
+Input shape: (12, 240, 320, 3), dtype: uint8
+Input size: 2.8 MB
+
+CPU baseline results:
+  Time:       4.047 s  (337.2 ms/frame)
+  Agreement with cv2.MOG2: 1.000000
+  Throughput: 2.97 frames/s
+
+OK — this is the reference every GPU version is tested against.
+```
+
+`python benchmarks/profile_cpu.py` puts **99.8% of that time in `mog2_step`** — the
+reproducible bottleneck analysis behind the first kernel (the model). The later kernels are
+justified by the per-stage pipeline profile in `RESULTS-T4.md` §4, taken after the model had
+moved and the bottleneck had shifted to the host stages. (On the Colab T4
+host the same sequential pipeline measures 3035 ms/frame at 854×480; see `RESULTS-T4.md`.)
+
 ### 5. Goals and Deliverables
 
 **75% — Minimum viable:**
@@ -162,6 +185,13 @@ display / write
 - **Performance target:** >30 FPS at 1080p on a T4, >20× over sequential Python
 - Composite output: sharp vehicles, blurred road
 - Jupyter notebook with code, explanation and benchmark charts
+
+**How this maps to the course's optimization ladder** (Project Description, Part 1.2):
+Level 0 = `GMM_Mask_CPU`; Level 1 (naive GPU port, "correct, not fast") = v0; Level 2 (memory:
+coalesced planar state, 3 B/px ingest, shared-memory tiling, 35.25→16.59 MB bus) = v1 and v2's
+tiled kernels; Level 3 (compute: kernel fusion) = v2's fused threshold; the Q8 integer blur is
+the correctness story and ships in v1 and v2 alike; Level 4 (streams) is identified by
+measurement as the next step and deliberately not claimed.
 
 **125% — Stretch goals:**
 
@@ -217,6 +247,27 @@ All of these run without a GPU under `NUMBA_ENABLE_CUDASIM=1`, except the compil
 The blur is a stronger claim than the model, and worth separating: it is integer arithmetic end to end, so its equality with `cv2.GaussianBlur` holds independently of GPU architecture and compiler flags, where the float32 MOG2 kernel's parity depends on how FMAs contract.
 
 ---
+
+### 7. Risks
+
+1. **The dataset host disappears.** It did — the CDnet download host
+   (`wordpress-jodoin.dmi.usherb.ca`) stopped resolving mid-project, and `changedetection.net`
+   now serves only an HTML landing page.
+   Mitigation, applied: every quality figure carries the commit it was measured at,
+   `tests/test_scoring.py` pins the CDnet protocol itself on a hand-checkable fixture, every
+   pipeline runs end-to-end on synthetic frames with the source labelled, and `eval_highway.py`
+   re-scores in one command the moment a local copy exists.
+
+2. **The CUDA simulator passes code that real hardware rejects.** It did — a tiled median with a
+   non-constant shared-memory shape was green under CUDASIM for weeks and had never compiled on
+   a GPU. Mitigation, applied: `test_every_kernel_actually_compiles_on_real_hardware`, which
+   *skips under the simulator by design* and forces every kernel through nvvm on the T4.
+
+3. **Floating-point parity drifts across OpenCV builds and GPU architectures.** Partially
+   materialised: the float32 model disagrees with cv2 by 22 px of 1.5M on real video.
+   Mitigation, applied: the blur and colour conversion are integer end-to-end (bit-exact on four
+   OpenCV builds, ARM and x86), the model's residual is measured and reported rather than
+   rounded away, and parity is a per-frame `np.array_equal` gate, not an F1 comparison.
 
 ### Division of Labour (as delivered)
 

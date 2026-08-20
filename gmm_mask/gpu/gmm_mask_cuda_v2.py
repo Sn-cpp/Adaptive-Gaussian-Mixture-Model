@@ -5,7 +5,8 @@ v1 runs three kernels per frame: MOG2 step, threshold, median. v2 runs two.
 **What fuses.** The threshold reads `bg_prob` at pixel (y, x) and writes one
 byte at (y, x) — no neighbours, no other pixel's result. The MOG2 kernel has
 `bg_weight_sum` sitting in a register at exactly that point. So the threshold
-is not a kernel at all in v2; it is two lines in the model kernel's epilogue,
+is not a kernel at all in v2; it is a single assignment in the model
+kernel's epilogue,
 and it removes a full-frame write followed by a full-frame read.
 
 **What does not.** The median needs its neighbours' *post-threshold* values,
