@@ -186,7 +186,7 @@ display / write
   itself costs 0.184 ms. Two results worth stating because they were predicted wrongly:
   shared-memory tiling was expected to barely beat the naive blur, and wins **2.36×** (2.36 /
   2.36 / 2.37 across the three resolutions, and again under a second protocol); and after the change the largest single stage is
-  the host flood fill at 36.7%, not any kernel.
+  the host flood fill at 39.7% (1080p), not any kernel.
 
   The median is worth a note: on a binary mask a median **is a majority vote**, so the kernel counts instead of sorting, and is bit-exact with `cv2.medianBlur` rather than an approximation of it. The threshold fuses because it reads and writes one pixel; the median does not, because it needs its neighbours' post-threshold values and CUDA has no grid-wide barrier — fusing it would be a race that mostly does not show up in testing.
 

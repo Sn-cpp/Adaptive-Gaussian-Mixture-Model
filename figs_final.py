@@ -86,28 +86,50 @@ def fig_speedup():
 
 # ── 2. where the frame goes ──────────────────────────────────────────────────
 
-STAGE = {"mask (H2D + kernels + D2H)": [1.167, 2.263, 3.777],
-         "host fill_holes": [0.876, 3.231, 4.462],
-         "composite (H2D + kernels + D2H)": [1.164, 2.198, 3.933]}
+# Per-stage at commit bc55214, sync-bounded wall clock (RESULTS-T4.md §4).
+# For the chart, v0's five stages are folded into the same three buckets
+# v1/v2 report — mask production (cvt+model+threshold+median), host fill,
+# blur+composite — so the three bars stack comparably; the full five-way
+# split is in the table.
+PERSTAGE = {  # ms per frame: [480p, 720p, 1080p]
+    "v0": {"mask production": [6.278, 12.302, 35.924],
+           "host fill_holes": [0.965, 2.155, 4.622],
+           "blur + composite": [3.385, 6.333, 14.383]},
+    "v1": {"mask production": [1.175, 1.940, 3.651],
+           "host fill_holes": [0.877, 1.938, 4.441],
+           "blur + composite": [1.616, 3.083, 6.057]},
+    "v2": {"mask production": [1.149, 1.984, 3.510],
+           "host fill_holes": [0.882, 1.972, 4.719],
+           "blur + composite": [1.108, 2.044, 3.665]},
+}
+STAGE_COLORS = {"mask production": BLUE, "host fill_holes": RED,
+                "blur + composite": GREY}
 
 
 def fig_perstage():
-    fig, ax = plt.subplots(figsize=(7.6, 3.6))
-    x = np.arange(3)
-    bottom = np.zeros(3)
-    for (name, vals), c in zip(STAGE.items(), (BLUE, RED, GREY)):
-        ax.bar(x, vals, 0.5, bottom=bottom, label=name, color=c)
-        for xi, (v, b0) in enumerate(zip(vals, bottom)):
-            if v > 0.8:
-                ax.text(xi, b0 + v / 2, f"{v:.2f}", ha="center", va="center",
-                        fontsize=8, fontweight="bold",
-                        color="white" if c != GREY else "black")
-        bottom += np.array(vals)
-    ax.set_xticks(x); ax.set_xticklabels(SIZES)
-    ax.set_ylabel("ms / frame", fontweight="bold")
-    ax.set_title("v2, per stage — the host flood fill dominates from 720p up",
-                 fontweight="bold", fontsize=10)
-    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    fig, axes = plt.subplots(1, 3, figsize=(11.5, 3.4), sharey=False)
+    for ax, (si, lbl) in zip(axes, enumerate(SIZES)):
+        x = np.arange(3)
+        bottom = np.zeros(3)
+        for stage, c in STAGE_COLORS.items():
+            vals = [PERSTAGE[v][stage][si] for v in ("v0", "v1", "v2")]
+            ax.bar(x, vals, 0.55, bottom=bottom, color=c,
+                   label=stage if si == 0 else None)
+            for xi, (v, b0) in enumerate(zip(vals, bottom)):
+                if v > 0.55 * (1 + 3 * si):
+                    ax.text(xi, b0 + v / 2, f"{v:.1f}", ha="center", va="center",
+                            fontsize=7, fontweight="bold",
+                            color="white" if c != GREY else "black")
+            bottom += np.array(vals)
+        ax.set_xticks(x); ax.set_xticklabels(["v0", "v1", "v2"])
+        ax.set_title(lbl, fontweight="bold", fontsize=10)
+        if si == 0:
+            ax.set_ylabel("ms / frame", fontweight="bold")
+    fig.legend(loc="upper center", ncol=3, frameon=False, fontsize=9,
+               bbox_to_anchor=(0.5, 1.06))
+    fig.suptitle("Per stage, all three versions — at 1080p the host flood fill "
+                 "is v2's largest stage (39.7%)", fontweight="bold",
+                 fontsize=10, y=1.16)
     _save(fig, "fig_final_perstage.png")
 
 

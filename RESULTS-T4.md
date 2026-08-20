@@ -128,20 +128,87 @@ baseline. The old 5.72× was partly measuring waste in the thing being beaten.
 
 ---
 
-## 4. Per-stage, v2 — the bottleneck moved as predicted
+## 4. Per-stage, all three versions — the bottleneck moved as predicted
 
-| stage | 480p | 720p | 1080p |
+Sync-bounded wall clock (`perf_counter` with every device stage synchronised before the clock is
+read — not CUDA events), 16 timed frames per version, fresh model per version, measured at
+commit `bc55214` on the same T4. v0's chain is split finer than v1/v2's because those are
+exactly the stages v1 moves onto the device, so the columns line up by construction.
+
+**480p (854×480)**
+
+| stage | v0 | v1 | v2 |
 |---|---|---|---|
-| mask (H2D + kernels + D2H) | 1.167 ms · 36.4% | 2.263 · 29.4% | 3.777 · 31.0% |
-| **host `fill_holes`** | 0.876 ms · 27.3% | **3.231 · 42.0%** | **4.462 · 36.7%** |
-| composite (H2D + kernels + D2H) | 1.164 ms · 36.3% | 2.198 · 28.6% | 3.933 · 32.3% |
+| host cvtColor | 0.285 ms · 2.7% | — | — |
+| f32 H2D + model + mask/bg D2H | 4.517 · 42.5% | — | — |
+| host threshold + median | 1.476 · 13.9% | — | — |
+| ingest (H2D+cvt+model+post+D2H) | — | 1.175 · 32.0% | 1.149 · 36.6% |
+| host `fill_holes` | 0.965 · 9.1% | 0.877 · 23.9% | 0.882 · 28.1% |
+| host blur + composite | 3.385 · 31.8% | — | — |
+| composite (H2D+blur+D2H) | — | 1.616 · 44.0% | 1.108 · 35.3% |
+| **total** | **10.627** | **3.668** | **3.140** |
+
+**720p (1280×720)**
+
+| stage | v0 | v1 | v2 |
+|---|---|---|---|
+| host cvtColor | 0.576 ms · 2.8% | — | — |
+| f32 H2D + model + mask/bg D2H | 8.778 · 42.2% | — | — |
+| host threshold + median | 2.948 · 14.2% | — | — |
+| ingest (H2D+cvt+model+post+D2H) | — | 1.940 · 27.9% | 1.984 · 33.1% |
+| host `fill_holes` | 2.155 · 10.4% | 1.938 · 27.8% | 1.972 · 32.9% |
+| host blur + composite | 6.333 · 30.5% | — | — |
+| composite (H2D+blur+D2H) | — | 3.083 · 44.3% | 2.044 · 34.1% |
+| **total** | **20.790** | **6.962** | **6.000** |
+
+**1080p (1920×1080)**
+
+| stage | v0 | v1 | v2 |
+|---|---|---|---|
+| host cvtColor | 1.220 ms · 2.2% | — | — |
+| f32 H2D + model + mask/bg D2H | 28.585 · 52.0% | — | — |
+| host threshold + median | 6.119 · 11.1% | — | — |
+| ingest (H2D+cvt+model+post+D2H) | — | 3.651 · 25.8% | 3.510 · 29.5% |
+| host `fill_holes` | 4.622 · 8.4% | 4.441 · 31.4% | **4.719 · 39.7%** |
+| host blur + composite | 14.383 · 26.2% | — | — |
+| composite (H2D+blur+D2H) | — | 6.057 · 42.8% | 3.665 · 30.8% |
+| **total** | **54.930** | **14.149** | **11.894** |
+
+Totals sit close to §3's end-to-end medians (55.03 / 13.75 / 11.26 at 1080p; here 54.93 /
+14.15 / 11.89 — v0 −0.2%, v1 +2.9%, v2 +5.6%). These are separate runs under different
+protocols: §3 is the median of five interleaved passes, this a single instrumented pass. The
+stage boundaries add no synchronisation of their own — the pipeline methods already sync
+internally — so the offsets are what two runs on a shared T4 look like; no variance was
+recorded, so they are reported as deltas rather than dismissed as noise. Quote §3 for
+end-to-end figures; read this section for how the frame divides. Across the two runs the stage
+*ranking* is stable — fill_holes is v2's largest 1080p stage in both — while the shares
+themselves move by up to 3.8 percentage points (fill 35.9% → 39.7%), which is the honest
+resolution of a single-run percentage on a shared T4.
+
+For charting, v0's five stages fold into the three buckets v1/v2 report — *mask production*
+(cvtColor + model + threshold/median), *fill*, *blur+composite* — giving v0 mask production of
+**6.278 / 12.302 / 35.924 ms** at the three sizes. The charts in `figs_final.py` and the
+notebook use exactly these folds.
+
+**What the three columns say, read together at 1080p:**
+
+- **The ingest transformation is 28.59 ms → 3.65 ms.** v0's biggest stage — planar-float32
+  upload plus the model kernel plus two copies back — becomes v1's smallest meaningful one.
+- **Tiling is visible end to end, not just in isolation:** v1's composite 6.06 ms → v2's
+  3.67 ms. That is the 2.36× kernel-level tiling win of §5 surviving contact with the transfers
+  around it.
+- **`fill_holes` is the largest single stage of v2 at 1080p — 39.7%.** At 480p the three stages
+  are within a millisecond of each other and ingest is nominally largest; at 720p they are a
+  three-way tie (33.1 / 32.9 / 34.1). The clean statement is: the higher the resolution, the
+  more the host flood fill dominates. (An earlier v2-only run put it at 36.7%; the ranking is
+  stable across runs, the percentage point is not.)
 
 The plan predicted, before any of this was built: *"the frame budget should be dominated by the
 MOG2 kernel's model-state traffic and the host `fill_holes` — **not** by the blur. If so, say so:
 the next real win is streams, not a better blur."*
 
-**Confirmed.** `fill_holes` is the largest single stage at 720p and 1080p. The next win is CUDA
-streams overlapping frame N+1's ingest with frame N's flood fill.
+**Confirmed at 1080p.** The next win is CUDA streams overlapping frame N+1's ingest with frame
+N's flood fill.
 
 ---
 
@@ -223,7 +290,7 @@ ever be worthwhile".
 | GPU blur kernels @1080p | 0.2–0.4 ms | **1.55 ms** (tiled) |
 | **tiled vs naive** | *"probably close to naive"* | **2.36×**, twice, batched and interleaved |
 | ingest+blur saved @1080p | 4–8 ms | **~34 ms** |
-| bottleneck after the change | host `fill_holes`, not the blur | **confirmed, 36.7%** |
+| bottleneck after the change | host `fill_holes`, not the blur | **confirmed, 39.7% at 1080p** |
 | bus traffic reduction @1080p | −38.5% | **−52.9%** (the estimate omitted v0's `bg_prob` D2H) |
 
 **Five of the six missed; only the bottleneck call held.** They did not miss the same way, and
