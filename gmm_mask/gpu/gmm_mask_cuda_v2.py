@@ -76,7 +76,7 @@ def mog2_step_fused_kernel(frame, weights, means, vars_, modes, mask, bg_prob,
     A transliteration of `mog2_step_v1_kernel` with `adaptive_alpha` off — the
     adaptive path is not carried into v2 because it is unmeasured on the car
     dataset and fusing an unvalidated variant would make the parity test
-    meaningless. The only additions are the last two lines.
+    meaningless. The only additions are the final assignment.
     """
     x, y = cuda.grid(2)
     H = frame.shape[1]
