@@ -189,35 +189,95 @@ def one_pass(build, fn, frames, warm=8):
 
 
 def stage_breakdown(size, n=24):
-    """Where the frame actually goes, for v2. `proposal.md` promises this."""
+    """Where the frame actually goes, for each of v0, v1 and v2.
+
+    Boundaries are sync-bounded wall clock: `time.perf_counter()` with every
+    device stage synchronised before the clock is read (`mask_from_bgr` and
+    `composite` sync internally; v0's `apply` copies back, which syncs). These
+    are NOT CUDA events — a stage that says "H2D+kernels+D2H" is the wall time
+    of that whole span, not a kernel-only figure, and the labels say so.
+
+    This is the table `proposal.md` §6 promises. The earlier version measured
+    only v2, which could not answer the obvious referee question — of the
+    end-to-end speedup, how much comes from fusing, how much from tiling, and
+    how much from moving the blur at all. Three columns per version answers it
+    by inspection: v0's host stages shrink to device stages in v1, and v1's
+    device stages shrink again in v2.
+    """
     from numba import cuda
     w, h = size
     frames = make_frames(n, size)
-    m = GMM_Mask_CUDA_v2(h, w)
-    for f in frames[:8]:
-        run_gpu(m, f)
-    cuda.synchronize()
+    warm = 8
 
-    acc = dict.fromkeys(("mask (H2D+kernels+D2H)", "host fill_holes",
-                         "composite (H2D+kernels+D2H)"), 0.0)
-    for f in frames[8:]:
-        t = time.perf_counter()
-        refined = m.mask_from_bgr(f)
-        acc["mask (H2D+kernels+D2H)"] += time.perf_counter() - t
-        t = time.perf_counter()
-        filled = fill_holes(refined)
-        acc["host fill_holes"] += time.perf_counter() - t
-        t = time.perf_counter()
-        m.composite(filled)
-        acc["composite (H2D+kernels+D2H)"] += time.perf_counter() - t
+    def timed_stages(build, stages):
+        """Drive one fresh model; return mean ms per named stage."""
+        m = build()
+        for f in frames[:warm]:
+            for _, fn in stages:
+                fn(m, f)
+        cuda.synchronize()
+        acc = {name: 0.0 for name, _ in stages}
+        for f in frames[warm:]:
+            for name, fn in stages:
+                t = time.perf_counter()
+                fn(m, f)
+                acc[name] += time.perf_counter() - t
+        k = len(frames) - warm
+        return {name: v / k * 1000 for name, v in acc.items()}
 
-    k = len(frames) - 8
-    total = sum(acc.values()) / k * 1000
-    print(f"\nper-stage, v2 at {w}x{h}")
-    for name, s in acc.items():
-        ms = s / k * 1000
-        print(f"  {name:32s} {ms:8.3f} ms  {ms / max(total, 1e-9):6.1%}")
-    print(f"  {'total':32s} {total:8.3f} ms")
+    # Stage chains mirror run_v0/run_gpu exactly — same calls, same order,
+    # state threaded through a scratch dict so each stage feeds the next.
+    scratch = {}
+
+    def v0_stages():
+        def cvt(m, f):
+            scratch["ycc"] = cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb)
+
+        def model_step(m, f):
+            mask, bg_prob, _ = m.apply(scratch["ycc"])
+            scratch["mask"], scratch["bg"] = np.asarray(mask), np.asarray(bg_prob)
+
+        def thr_med(m, f):
+            scratch["refined"] = refine_mask(scratch["mask"],
+                                             bg_prob=scratch["bg"], do_fill=False)
+
+        def fill(m, f):
+            scratch["filled"] = fill_holes(scratch["refined"])
+
+        def blur(m, f):
+            background_blur(f, scratch["filled"], BLUR_KSIZE, BLUR_SIGMA)
+
+        return [("host cvtColor", cvt),
+                ("f32 H2D + model + mask/bg D2H", model_step),
+                ("host threshold + median", thr_med),
+                ("host fill_holes", fill),
+                ("host blur + composite", blur)]
+
+    def gpu_stages():
+        def ingest(m, f):
+            scratch["refined"] = m.mask_from_bgr(f)
+
+        def fill(m, f):
+            scratch["filled"] = fill_holes(scratch["refined"])
+
+        def comp(m, f):
+            m.composite(scratch["filled"])
+
+        return [("ingest (H2D+cvt+model+post+D2H)", ingest),
+                ("host fill_holes", fill),
+                ("composite (H2D+blur+D2H)", comp)]
+
+    versions = [("v0", lambda: GMM_Mask_CUDA(h, w), v0_stages()),
+                ("v1", lambda: GMM_Mask_CUDA_v1(h, w), gpu_stages()),
+                ("v2", lambda: GMM_Mask_CUDA_v2(h, w), gpu_stages())]
+
+    print(f"\nper-stage at {w}x{h} — sync-bounded wall clock, {n - warm} frames")
+    for name, build, stages in versions:
+        r = timed_stages(build, stages)
+        total = sum(r.values())
+        print(f"  {name}  (total {total:7.3f} ms)")
+        for stage, ms in r.items():
+            print(f"    {stage:34s} {ms:8.3f} ms  {ms / max(total, 1e-9):6.1%}")
 
 
 def bench(size, n=40, with_sequential=False):
