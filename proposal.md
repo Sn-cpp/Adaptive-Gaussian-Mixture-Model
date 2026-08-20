@@ -218,9 +218,14 @@ The blur is a stronger claim than the model, and worth separating: it is integer
 
 ---
 
-### Weekly Schedule
+### Division of Labour (as delivered)
 
-| | Week 1 | Week 2 | Week 3 | Week 4 |
-|---|---|---|---|---|
-| **Hải Dương** | Sequential MOG2, OpenCV parity harness | Numba CPU (`prange`), profiling | CUDA model kernel, planar coalesced state | `eval_highway.py`, post-processing v1/v2 kernels, final benchmarks |
-| **Đức Tín** | Sequential blur + composite | Numba blur, FPS framework | CUDA blur with shared-memory tiling | Mask-quality experiments, demo video, notebook and report |
+The weekly plan this section originally held assigned the model to Hải Dương
+and the blur, notebook and report to Đức Tín. The split changed as the work
+progressed, and this table records what actually happened — it matches the
+git history, which is the honest reference for who wrote what.
+
+| | Delivered |
+|---|---|
+| **Đức Tín** | The background model, end to end: sequential Python reference, the Numba CPU version, and the first CUDA model kernel (`gmm_mask/cpu/*`, `gmm_mask/gpu/gmm_mask_cuda.py`). Push-relabel and GrabCut experiments (retained on branch `dev/HD`). |
+| **Hải Dương** | Post-processing on the GPU (v1/v2), Kernel 2 (the Q8 blur, colour conversion, composite), the test suite, the measurement harnesses (`bench_post.py`, `bench_t4.py`, `bench_fill.py`, `eval_highway.py`), the notebook and the reports. |
