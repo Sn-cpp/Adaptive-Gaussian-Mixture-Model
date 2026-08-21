@@ -310,6 +310,33 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
     return 1
 
 
+def scorable(gt, roi):
+    """The pixels CDnet says may be scored at all.
+
+    CDnet labels shadows 50 and object boundaries 170 and defines both as
+    *don't care*, and it ships an ROI mask. Counting either is the easiest way
+    in this project to publish a confident, reproducible, wrong number, so the
+    rule lives in one function that `tests/test_scoring.py` imports and checks
+    against a fixture whose answer is countable by hand.
+    """
+    return roi & ((gt == 255) | (gt == 0))
+
+
+def confusion(pred, gt, roi):
+    """(TP, FP, FN) over the scorable pixels only."""
+    valid = scorable(gt, roi)
+    g = (gt == 255) & valid
+    p = (pred == 255) & valid
+    return int(np.sum(p & g)), int(np.sum(p & ~g)), int(np.sum(~p & g))
+
+
+def metrics(tp, fp, fn):
+    """(F1, IoU, precision, recall). Zero-safe: an empty mask scores 0."""
+    p = tp / max(tp + fp, 1)
+    r = tp / max(tp + fn, 1)
+    return (2 * p * r / max(p + r, 1e-9), tp / max(tp + fp + fn, 1), p, r)
+
+
 # ── scoring ───────────────────────────────────────────────────────────────────
 
 def score(root, colorspace="bgr", t0=T0, t1=T1, limit_chains=None,
