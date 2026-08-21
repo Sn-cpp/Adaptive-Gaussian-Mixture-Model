@@ -37,6 +37,14 @@ class GMM_Mask_CUDA_v2(GMM_Mask_CUDA_v1):
     refined mask is verified against v1 pixel-for-pixel in `tests/`.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.post and (self.adaptive_alpha or self.propagate):
+            # the fused path launches the plain kernel and would silently
+            # ignore these flags — fail loudly instead of lying
+            raise ValueError("cuda_v2's fused post path does not run "
+                             "adaptive_alpha/propagate; use cuda_v1 or post=False")
+
     def _blur_kernels(self):
         """The tiled pair. Same output as v1's, each pixel read once per block.
 
