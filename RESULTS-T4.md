@@ -320,9 +320,15 @@ chains quoted in the report (BGR 0.8272; CLOSE precision 0.9634; contour 0.5541)
 
 The first GPU-backend parity sweep over the real 1231 frames
 (`eval_highway.py --model cuda_v2 --parity-vs numba`) observed 2 differing mask pixels
-out of 94,540,800 and stopped under the original strict gate. The exact captured output
-is committed at `benchmarks/records/parity_cuda_v2_vs_numba_t4.txt`. A T4 rerun with the
-boundary-aware gate from `8a4e159` is still required before classifying those two pixels.
+out of 94,540,800 and stopped under the original strict gate (captured at
+`benchmarks/records/parity_cuda_v2_vs_numba_t4.txt`). The rerun at `f6c0bfc` with the
+seed-tracing gate classified both, for cuda_v2 **and** cuda_v1: one flip is a direct
+output-threshold straddle (bg_prob 0.4999971 vs 0.5000015), and the other traces to a
+proven one-ulp seed at the `dist2 < Tb·var` branch (margins +0.0002746582 vs
+−0.00030517578 on ulp-close states) whose state divergence then cascaded. Verdict
+FLOAT-BOUNDARY; the integer stages are exact. Raw output, plus the real-footage FPS
+table and the x86 F1 re-reproduction from the same session:
+`benchmarks/records/t4_final_run.txt`.
 
 **The 81.8%-on-host profile** quoted in the notebook is a one-off from earlier in the project,
 kept because it is what motivated v1. §4 is the version this repository reproduces.

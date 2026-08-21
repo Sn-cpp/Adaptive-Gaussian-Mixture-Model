@@ -12,8 +12,10 @@ the original `b2523ba` figures digit for digit. Raw output:
 
 Measured on a Colab T4: **88.8 FPS at 1080p**, 4.89× over the v0 baseline and
 10.25× over Numba CPU, with all four backends producing byte-identical masks and
-composites over 1.49 billion pixel positions. Full numbers and method in
-[RESULTS-T4.md](RESULTS-T4.md).
+composites over 1.49 billion synthetic pixel positions. On the 1231 real CDnet
+frames, 2 pixels of 94.5 million differ — both proven float32 threshold-boundary
+flips ([benchmarks/records/t4_final_run.txt](benchmarks/records/t4_final_run.txt)).
+Full numbers and method in [RESULTS-T4.md](RESULTS-T4.md).
 
 ## Quick start
 

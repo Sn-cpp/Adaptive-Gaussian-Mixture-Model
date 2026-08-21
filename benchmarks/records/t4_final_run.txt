@@ -1,0 +1,62 @@
+Captured from the team's Google Colab T4 run on 2026-08-21.
+Hardware: Tesla T4, 15360 MiB, NVIDIA driver 580.82.07
+Runner: benchmarks/run_t4_final.ipynb at commit f6c0bfc, Run all.
+The head of the cell-3 evidence table scrolled out of the captured paste; the
+verdict lines and the per-mode margin table for the seed frame are verbatim.
+
+=== parity cuda_v2 vs numba, real CDnet frames (tail of cell 3 output) ===
+
+ 328.96439 vs 328.96432; Tb margins +0.0002746582 vs -0.00030517578; Tg margins +143.92207 vs +143.92172; total<TB margins -0.89999998 vs -0.89999998
+        sort 0/1: signed gaps -0.71823847 vs -0.71824205 (|gap| 7.182e-01 vs 7.182e-01)
+      mode 1 (distance reached True/True): dist2 15116.674 vs 15116.669; Tb margins +13916.674 vs +13916.669; Tg margins +14441.674 vs +14441.669; total<TB margins -0.06396544 vs -0.063963652
+        sort 1/2: signed gaps -0.081768841 vs -0.081767142 (|gap| 8.177e-02 vs 8.177e-02)
+      mode 2 (distance reached True/True): dist2 3090.9548 vs 3090.9565; Tb margins +2066.1538 vs +2066.1558; Tg margins +2514.5044 vs +2514.5061; total<TB margins +0.053830624 vs +0.053830624
+        sort 2/3: signed gaps -0.028220443 vs -0.028220385 (|gap| 2.822e-02 vs 2.822e-02)
+      mode 3 (distance reached True/True): dist2 25.215452 vs 25.215452; Tb margins -395.6684 vs -395.66843; Tg margins -211.53171 vs -211.53172; total<TB margins +0.089857817 vs +0.089857757
+        sort 3/4: signed gaps -0.0054712743 vs -0.0054712733 (|gap| 5.471e-03 vs 5.471e-03)
+      mode 4 (distance reached False/False): dist2 7749 vs 7749; Tb margins +7509 vs +7509; Tg margins +7614 vs +7614; total<TB margins +0.097664595 vs +0.097664535
+  VERDICT: FLOAT-BOUNDARY — 1 output-threshold flips + 1 cascaded flips from proven ulp branch seeds over 1231 frames.
+  The integer stages are exact; this is the documented float32 compiler-contraction limit, same class as the 22-px cv2 residual.
+
+=== parity cuda_v1 vs numba: identical evidence table, same verdict ===
+
+  VERDICT: FLOAT-BOUNDARY — 1 output-threshold flips + 1 cascaded flips from proven ulp branch seeds over 1231 frames.
+
+========================================================================
+T4 FINAL MEASUREMENTS — paste this whole block back
+========================================================================
+
+[commit]
+f6c0bfc realfootage: send a browser User-Agent to Pexels; surface stderr in the runner
+
+[env]
+python 3.12.13 | cv2 4.14.0 | numba 0.60.0
+
+[tests]
+76 passed, 18 warnings in 23.65s
+
+[dataset]
+highway: 1700 input, 1700 gt, sha OK
+
+[parity_cuda_v2]
+VERDICT: FLOAT-BOUNDARY — 1 output-threshold flips + 1 cascaded flips from proven ulp branch seeds over 1231 frames.
+
+[parity_cuda_v1]
+VERDICT: FLOAT-BOUNDARY — 1 output-threshold flips + 1 cascaded flips from proven ulp branch seeds over 1231 frames.
+
+[realfootage]
+real footage (Pexels 4791721), 152 timed frames per cell, decode excluded from timing
+    tier          numba            v0            v1            v2
+    240p     5.47ms  183     2.99ms  334     1.92ms  520     1.41ms  708
+    480p    25.95ms   39    11.33ms   88     4.85ms  206     4.29ms  233
+    720p    64.17ms   16    23.05ms   43     6.70ms  149     5.70ms  175
+   1080p   145.79ms    7    53.64ms   19    13.41ms   75    11.07ms   90
+
+  (columns: ms/frame then FPS. Same scene at every tier — only the
+   pixel count changes. Quality is scored on CDnet, not on this clip.)
+
+[f1_repro]
+bg_prob + median5 + fill              0.9843  0.9691  0.9863  0.9823      0    0.64
+
+total wall time: 3.7 min
+========================================================================
