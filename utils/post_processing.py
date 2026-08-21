@@ -34,8 +34,7 @@ the sequence of them. Profiling says leave it on the CPU, so we do.
 import cv2
 import numpy as np
 
-from settings import (CLOSE_KSIZE_FRACTION, CLOSE_KSIZE_MAX,
-                      MOG2_BG_PROB_THRESHOLD)
+from settings import MOG2_BG_PROB_THRESHOLD
 
 
 def fill_holes(mask: np.ndarray) -> np.ndarray:
@@ -58,12 +57,6 @@ def fill_holes(mask: np.ndarray) -> np.ndarray:
     cv2.floodFill(padded, np.zeros((h + 4, w + 4), np.uint8), (0, 0), 255)
     holes = cv2.bitwise_not(padded)[1:h + 1, 1:w + 1]
     return mask | holes
-
-
-def close_ksize_for(height: int) -> int:
-    """CLOSE kernel scaled to the frame, odd, capped. Off by default for cars."""
-    k = int(round(CLOSE_KSIZE_FRACTION * height))
-    return max(3, min(k | 1, CLOSE_KSIZE_MAX))
 
 
 def threshold_bg_prob(bg_prob: np.ndarray,

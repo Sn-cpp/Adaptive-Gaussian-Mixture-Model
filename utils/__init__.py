@@ -1,1 +1,1 @@
-from .img_utils import to_planar, line_measurer, line_measurer_cuda
+from .img_utils import to_planar  # noqa: F401 — public API, used as `from utils import to_planar`

@@ -38,8 +38,6 @@ MOG2_BG_PROB_THRESHOLD = np.float32(0.5)
 # Morphological CLOSE applied to the binary mask before the hole fill, as a
 # fraction of frame height. Capped: a kernel wider than the gap between two
 # objects merges them into one blob, and F1 will not tell you.
-CLOSE_KSIZE_FRACTION = 0.0625
-CLOSE_KSIZE_MAX = 61
 
 # Background blur
 BLUR_KSIZE = 15
