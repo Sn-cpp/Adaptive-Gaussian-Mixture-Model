@@ -39,8 +39,13 @@ TIERS = [("240p", (320, 240)), ("480p", (854, 480)),
 
 def fetch_clip():
     if not os.path.exists(CLIP_PATH):
-        print(f"fetching {CLIP_URL} ...")
-        urllib.request.urlretrieve(CLIP_URL, CLIP_PATH)
+        print(f"fetching {CLIP_URL} ...", flush=True)
+        # Pexels rejects urllib's default User-Agent with 403
+        req = urllib.request.Request(CLIP_URL,
+                                     headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req) as r, open(CLIP_PATH, "wb") as f:
+            import shutil
+            shutil.copyfileobj(r, f)
     cap = cv2.VideoCapture(CLIP_PATH)
     w, h = int(cap.get(3)), int(cap.get(4))
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
