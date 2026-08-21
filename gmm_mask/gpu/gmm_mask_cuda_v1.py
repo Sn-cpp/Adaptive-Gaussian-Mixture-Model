@@ -1,7 +1,7 @@
 import numpy as np
 from numba import cuda, float32, int32, uint8
 
-from gmm_mask.gmm_mask_common import GMM_Mask_Base, kernel_args
+from gmm_mask.gmm_mask_common import GMM_Mask_Base
 from gmm_mask.gpu import blur_kernels as bk
 from gmm_mask.gpu import post_kernels as pk
 from settings import (

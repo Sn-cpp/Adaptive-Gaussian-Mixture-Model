@@ -22,7 +22,7 @@ per pixel of propagation distance — 593 passes and 748 ms against 2.6 ms at
 says leave it, so it is left.
 """
 import numpy as np
-from numba import cuda, float32, int32, uint8
+from numba import cuda, int32, uint8
 
 TILE_X = 32
 TILE_Y = 8

@@ -41,22 +41,6 @@ def _ellipse(k):
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
 
 
-def fill_holes(mask):
-    """Fill every background region fully enclosed by foreground.
-
-    Flood the background inward from a one-pixel border added around the frame,
-    then OR back the complement — whatever the flood could not reach is a hole.
-    The border matters: seeding at (0, 0) breaks the moment an object touches
-    that corner, because then the flood cannot start and the complement is the
-    whole image.
-    """
-    h, w = mask.shape
-    padded = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
-    cv2.floodFill(padded, np.zeros((h + 4, w + 4), np.uint8), (0, 0), 255)
-    holes = cv2.bitwise_not(padded)[1:h + 1, 1:w + 1]
-    return mask | holes
-
-
 def sobel_edges(frame_f32):
     """Tin's edge gate: |dI/dx| and |dI/dy| averaged, as uint8."""
     gray = cv2.cvtColor(frame_f32, cv2.COLOR_BGR2GRAY)

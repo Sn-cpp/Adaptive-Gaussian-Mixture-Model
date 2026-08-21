@@ -20,13 +20,12 @@ Measured effect is in `bench_post.py`. The numbers to expect: the fusion saves
 one kernel launch and 2 x H x W bytes of traffic; the tiling turns 25 global
 loads per pixel into about 1.4.
 """
-import numpy as np
 from numba import cuda, float32, int32, uint8
 
 from gmm_mask.gpu import blur_kernels as bk
 from gmm_mask.gpu import post_kernels as pk
 from gmm_mask.gpu.gmm_mask_cuda_v1 import (
-    GMM_Mask_CUDA_v1, TILE_X, TILE_Y, MAX_C, _detect_shadow,
+    GMM_Mask_CUDA_v1, MAX_C, _detect_shadow,
 )
 from settings import FLT_EPSILON
 

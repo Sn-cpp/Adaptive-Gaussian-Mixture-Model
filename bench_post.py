@@ -30,7 +30,6 @@ swings of 30% and more, larger than every effect this file tries to measure.
 """
 import argparse
 import platform
-import sys
 import time
 
 import cv2

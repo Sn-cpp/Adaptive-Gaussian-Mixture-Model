@@ -334,7 +334,6 @@ def fig_q8():
 
 def fig_fill():
     """Why the flood fill stays on the CPU: the pass count, not the clock."""
-    px = np.array([320 * 240, 854 * 480, 1280 * 720, 1920 * 1080]) / 1e6
     passes = [132, 266, 399, 593]
     labels = ["240p", "480p", "720p", "1080p"]
     fig, ax = plt.subplots(figsize=(6.4, 3.1))
