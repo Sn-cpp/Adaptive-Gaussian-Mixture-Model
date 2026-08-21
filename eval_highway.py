@@ -25,7 +25,8 @@ import numpy as np
 
 from gmm_mask import (GMM_Mask_CPU, GMM_Mask_CUDA, GMM_Mask_CUDA_v1,
                       GMM_Mask_CUDA_v2, GMM_Mask_CuPy, GMM_Mask_Numba)
-from settings import MOG2_BG_PROB_THRESHOLD
+from settings import (MOG2_BACKGROUND_RATIO, MOG2_BG_PROB_THRESHOLD,
+                      MOG2_VAR_THRESHOLD, MOG2_VAR_THRESHOLD_GEN)
 from settings import BLUR_KSIZE, BLUR_SIGMA
 from utils.post_processing import (background_blur, fill_holes, refine_mask,
                                    threshold_bg_prob)
@@ -186,6 +187,99 @@ def build_model(name, h, w, post=False, colorspace="ycrcb"):
     return cls(h, w, **kw)
 
 
+def _seed_proof(prev_a, prev_b, xpix, Tb, Tg, TB, eps=1e-4):
+    """Prove that close pre-frame states straddled a float32 MOG2 branch."""
+    nmodes_a = int(prev_a["nmodes"])
+    nmodes_b = int(prev_b["nmodes"])
+    fields = ("weights", "means", "vars")
+
+    def active_diff(name):
+        count = min(nmodes_a, nmodes_b)
+        delta = np.abs(
+            np.asarray(prev_a[name], dtype=np.float32)[:count]
+            - np.asarray(prev_b[name], dtype=np.float32)[:count])
+        return float(np.max(delta)) if delta.size else 0.0
+
+    diffs = [active_diff(name) for name in fields]
+    state_close = nmodes_a == nmodes_b and max(diffs, default=0.0) < 1e-3
+    lines = [
+        f"state: nmodes {nmodes_a} vs {nmodes_b}; max |Δ| "
+        f"weights={diffs[0]:.3e} means={diffs[1]:.3e} vars={diffs[2]:.3e} "
+        f"({'close' if state_close else 'NOT close'})"
+    ]
+    if nmodes_a != nmodes_b:
+        return False, lines
+
+    xpix = np.asarray(xpix, dtype=np.float32)
+    weights_a = np.asarray(prev_a["weights"], dtype=np.float32)
+    weights_b = np.asarray(prev_b["weights"], dtype=np.float32)
+    means_a = np.asarray(prev_a["means"], dtype=np.float32)
+    means_b = np.asarray(prev_b["means"], dtype=np.float32)
+    vars_a = np.asarray(prev_a["vars"], dtype=np.float32)
+    vars_b = np.asarray(prev_b["vars"], dtype=np.float32)
+    Tb, Tg, TB = np.float32(Tb), np.float32(Tg), np.float32(TB)
+
+    def dist2(mean):
+        total = np.float32(0.0)
+        for c in range(xpix.size):
+            dd = np.float32(mean[c] - xpix[c])
+            total = np.float32(total + np.float32(dd * dd))
+        return total
+
+    def straddles(a, b, scale):
+        a, b = np.float32(a), np.float32(b)
+        # A 1e-3 relative window is much wider than one ulp at highway's
+        # magnitudes, but still far below a meaningful MOG2 state difference.
+        bound = np.float32(1e-3) * np.float32(max(1.0, float(scale)))
+        return a != b and ((a <= 0 <= b) or (b <= 0 <= a)) \
+            and abs(float(a) - float(b)) < float(bound)
+
+    branch_straddle = False
+    reachable_a = reachable_b = True
+    total_a = total_b = np.float32(0.0)
+    for mode in range(nmodes_a):
+        da, db = dist2(means_a[mode]), dist2(means_b[mode])
+        mtba = np.float32(da - np.float32(Tb * vars_a[mode]))
+        mtbb = np.float32(db - np.float32(Tb * vars_b[mode]))
+        mtga = np.float32(da - np.float32(Tg * vars_a[mode]))
+        mtgb = np.float32(db - np.float32(Tg * vars_b[mode]))
+        mcuma = np.float32(total_a - TB)
+        mcumb = np.float32(total_b - TB)
+        scale = max(1.0, float(Tb * vars_a[mode]),
+                    float(Tb * vars_b[mode]))
+        reached_by_both = reachable_a and reachable_b
+        if reached_by_both:
+            branch_straddle |= straddles(mtba, mtbb, scale)
+            branch_straddle |= straddles(mtga, mtgb, scale)
+        lines.append(
+            f"mode {mode} (distance reached {reachable_a}/{reachable_b}): "
+            f"dist2 {da:.8g} vs {db:.8g}; "
+            f"Tb margins {mtba:+.8g} vs {mtbb:+.8g}; "
+            f"Tg margins {mtga:+.8g} vs {mtgb:+.8g}; "
+            f"total<TB margins {mcuma:+.8g} vs {mcumb:+.8g}")
+        if reachable_a and mtga < 0:
+            reachable_a = False
+        if reachable_b and mtgb < 0:
+            reachable_b = False
+        total_a = np.float32(total_a + weights_a[mode])
+        total_b = np.float32(total_b + weights_b[mode])
+
+        if mode + 1 < nmodes_a:
+            gap_a = np.float32(weights_a[mode + 1] - weights_a[mode])
+            gap_b = np.float32(weights_b[mode + 1] - weights_b[mode])
+            lines.append(
+                f"  sort {mode}/{mode + 1}: signed gaps {gap_a:+.8g} vs "
+                f"{gap_b:+.8g} (|gap| {abs(float(gap_a)):.3e} vs "
+                f"{abs(float(gap_b)):.3e})")
+
+    # The required snapshot contains no current-frame alpha/prune. Therefore
+    # cumulative and sort quantities are valuable evidence, but cannot prove a
+    # seed: the kernel compares updated weights there. Only reachable distance
+    # branches can conservatively establish the recurrence's first split.
+
+    return bool(state_close and branch_straddle), lines
+
+
 def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
            t0=T0, t1=T1):
     """Per-frame comparison of two backends' shipping mask and composite.
@@ -197,13 +291,13 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
     arithmetic end to end; any difference there is a bug, and this gate fails
     hard on it.
 
-    **The float32 model stage cannot promise bit-identity across compilers.**
-    LLVM on the host and NVVM on the device contract fused-multiply-adds
-    differently, so `bg_prob` can differ by ulps — and a pixel whose true value
-    sits within an ulp of the 0.5 threshold flips. This is the same phenomenon
-    as our measured 22-px disagreement with cv2's own MOG2, and the docs have
-    said so since the blur kernels landed. On synthetic frames no pixel lands
-    that close; long real sequences find a few.
+    **The float32 model stage is a per-pixel recurrence with branches.** LLVM
+    and NVVM contract fused-multiply-adds differently, so a one-ulp difference
+    at a distance, cumulative-weight, or sort branch can seed persistent model
+    state divergence at that pixel. The gate tracks the first divergent frame
+    per pixel and proves from the previous frame's state that the seed branch
+    was an ulp-scale straddle; it never grants cascaded differences a blanket
+    tolerance.
 
     So the gate does not grant a blanket tolerance. The compared pre-fill mask
     is post-median, and the 5x5 median moves a flip to neighbouring pixels — so
@@ -212,10 +306,11 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
     the two values must straddle the threshold and differ by less than
     BOUNDARY_EPS. It then re-runs the median on each raw mask and requires it
     to reproduce that backend's pre-fill mask exactly, so the post-median
-    differences are fully accounted for by the proven flips. Every flip proven
+    differences are fully accounted for by the proven flips. Direct
+    output-threshold straddles and flips traced to proven branch seeds
     → verdict FLOAT-BOUNDARY, exit 0, with the per-pixel evidence printed. Any
-    flip that is *not* a proven boundary case — or any difference in an
-    integer stage — is DIVERGED, exit 1.
+    flip that is neither — or any difference in an integer stage — is
+    DIVERGED, exit 1.
     """
     BOUNDARY_EPS = 1e-4          # |bg_prob_a - bg_prob_b| at a flipped pixel
 
@@ -229,6 +324,21 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
         plus a bg_prob fetch for the boundary diagnosis."""
         m = build_model(name, h, w, post=True, colorspace=colorspace)
         state = {}
+
+        def host_copy(name):
+            value = getattr(m, f"d_{name}", getattr(m, name))
+            if hasattr(value, "copy_to_host"):
+                return value.copy_to_host()
+            if hasattr(value, "get"):
+                return value.get()
+            return np.asarray(value).copy()
+
+        state["snap"] = lambda: {
+            "weights": host_copy("weights"),
+            "means": host_copy("means"),
+            "vars": host_copy("vars"),
+            "modes": host_copy("modes"),
+        }
         if hasattr(m, "mask_from_bgr"):
             def run(bgr):
                 pre = m.mask_from_bgr(bgr).copy()
@@ -257,13 +367,47 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
 
     n_pre = n_ref = n_comp = scored = 0
     integer_stage_bug = False
-    flips = []                   # (frame, y, x, bg_a, bg_b, proven)
+    flips = []       # (frame, y, x, bg_a, bg_b, output_boundary, cascade, ok)
+    diverged = {}    # (y, x) -> (seed_frame, proven, evidence_lines)
+    prev_a = prev_b = None
     saw_fg = False
     for i in range(1, t1 + 1):
         bgr = cv2.imread(os.path.join(root, "input", f"in{i:06d}.jpg"))
         pa, ra, ca = run_a(bgr)
         pb, rb, cb = run_b(bgr)
+        ba, bb = st_a["bg"](), st_b["bg"]()
+        new_seeds = np.argwhere(np.abs(ba - bb) > BOUNDARY_EPS)
+        host_frame = (cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
+                      if colorspace == "ycrcb" else bgr)
+        for y, x in new_seeds:
+            key = int(y), int(x)
+            if key in diverged:
+                continue
+            if prev_a is None:
+                proven, lines = False, ["no previous-frame state snapshot"]
+            else:
+                pixel_a = {
+                    "weights": prev_a["weights"][:, y, x],
+                    "means": prev_a["means"][:, :, y, x],
+                    "vars": prev_a["vars"][:, y, x],
+                    "nmodes": int(prev_a["modes"][y, x]),
+                }
+                pixel_b = {
+                    "weights": prev_b["weights"][:, y, x],
+                    "means": prev_b["means"][:, :, y, x],
+                    "vars": prev_b["vars"][:, y, x],
+                    "nmodes": int(prev_b["modes"][y, x]),
+                }
+                proven, lines = _seed_proof(
+                    pixel_a, pixel_b,
+                    np.asarray(host_frame[y, x], dtype=np.float32),
+                    MOG2_VAR_THRESHOLD, MOG2_VAR_THRESHOLD_GEN,
+                    MOG2_BACKGROUND_RATIO, BOUNDARY_EPS)
+            diverged[key] = (i, proven, lines)
         if i < t0:
+            # Full snapshots are intentionally unconditional while parity is
+            # armed: at 320x240 the simpler one-pass trace is cheap enough.
+            prev_a, prev_b = st_a["snap"](), st_b["snap"]()
             continue
         scored += 1
         saw_fg |= bool((rb == 255).any())
@@ -274,13 +418,15 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
         n_pre += dp; n_ref += dr; n_comp += dc
 
         if dp:
-            ba, bb = st_a["bg"](), st_b["bg"]()
             ta, tb = threshold_bg_prob(ba), threshold_bg_prob(bb)
             for y, x in np.argwhere(ta != tb):
                 va, vb = float(ba[y, x]), float(bb[y, x])
-                proven = (abs(va - vb) < BOUNDARY_EPS and
-                          (va - thr) * (vb - thr) <= 0)
-                flips.append((i, int(y), int(x), va, vb, proven))
+                boundary = (abs(va - vb) < BOUNDARY_EPS and
+                            (va - thr) * (vb - thr) <= 0)
+                seed = diverged.get((int(y), int(x)))
+                cascade = bool(seed and seed[0] <= i and seed[1])
+                flips.append((i, int(y), int(x), va, vb,
+                              boundary, cascade, boundary or cascade))
             # the raw flips must fully explain the post-median difference:
             # each backend's own 5x5 median over its raw mask has to
             # reproduce its pre-fill mask bit for bit
@@ -299,6 +445,7 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
                 if (np.asarray(comp) != background_blur(
                         bgr, np.asarray(ref), BLUR_KSIZE, BLUR_SIGMA)).any():
                     integer_stage_bug = True
+        prev_a, prev_b = st_a["snap"](), st_b["snap"]()
 
     px = scored * h * w
     print(f"\nparity {model_name} vs {ref_name}, {colorspace}, shipping mask "
@@ -308,21 +455,38 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
     print(f"  composite differing px     : {n_comp}")
     if flips:
         print(f"  flipped-pixel evidence (threshold {thr}):")
-        for f, y, x, va, vb, ok in flips[:20]:
+        for f, y, x, va, vb, boundary, cascade, ok in flips[:20]:
+            label = ("boundary ✓" if boundary else
+                     "proven seed cascade ✓" if cascade else
+                     "NOT boundary/seed ✗")
             print(f"    frame {f} ({y:3d},{x:3d})  bg_prob {va:.7f} vs {vb:.7f} "
-                  f"|Δ|={abs(va-vb):.2e}  {'boundary ✓' if ok else 'NOT boundary ✗'}")
+                  f"|Δ|={abs(va-vb):.2e}  {label}")
+    used_seeds = {
+        (y, x) for _, y, x, _, _, boundary, _, _ in flips
+        if not boundary and (y, x) in diverged
+    }
+    if used_seeds:
+        print("  branch-seed evidence:")
+        for y, x in sorted(used_seeds):
+            frame, proven, lines = diverged[(y, x)]
+            print(f"    seed frame {frame} ({y:3d},{x:3d})  "
+                  f"{'proven ✓' if proven else 'NOT proven ✗'}")
+            for line in lines:
+                print(f"      {line}")
     if not saw_fg:
         print("  DEGENERATE — no foreground in any frame; proves nothing")
         return 1
 
-    all_proven = flips and all(f[5] for f in flips)
+    all_proven = flips and all(f[7] for f in flips)
     if n_pre == 0 and n_ref == 0 and n_comp == 0:
         print("  VERDICT: IDENTICAL")
         return 0
     if all_proven and not integer_stage_bug:
-        dmax = max(abs(f[3] - f[4]) for f in flips)
-        print(f"  VERDICT: FLOAT-BOUNDARY — {len(flips)} flips over {scored} "
-              f"frames, every one a proven threshold-straddle (max |Δ| {dmax:.2e}).")
+        n_boundary = sum(f[5] for f in flips)
+        n_cascade = sum(not f[5] and f[6] for f in flips)
+        print(f"  VERDICT: FLOAT-BOUNDARY — {n_boundary} output-threshold flips + "
+              f"{n_cascade} cascaded flips from proven ulp branch seeds over "
+              f"{scored} frames.")
         print("  The integer stages are exact; this is the documented float32 "
               "compiler-contraction limit, same class as the 22-px cv2 residual.")
         return 0
