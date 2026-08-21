@@ -27,7 +27,8 @@ from gmm_mask import (GMM_Mask_CPU, GMM_Mask_CUDA, GMM_Mask_CUDA_v1,
                       GMM_Mask_CUDA_v2, GMM_Mask_CuPy, GMM_Mask_Numba)
 from settings import MOG2_BG_PROB_THRESHOLD
 from settings import BLUR_KSIZE, BLUR_SIGMA
-from utils.post_processing import background_blur, fill_holes, refine_mask
+from utils.post_processing import (background_blur, fill_holes, refine_mask,
+                                   threshold_bg_prob)
 
 DEFAULT_DIR = os.environ.get("HIGHWAY_DIR", "highway")
 T0, T1 = 470, 1700
@@ -204,13 +205,17 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
     said so since the blur kernels landed. On synthetic frames no pixel lands
     that close; long real sequences find a few.
 
-    So the gate does not grant a blanket tolerance. When a pre-fill mask pixel
-    differs, it fetches **both** backends' `bg_prob` at that exact pixel and
-    verifies the flip individually: the two values must straddle the threshold
-    and differ by less than BOUNDARY_EPS. Every flip proven → verdict
-    FLOAT-BOUNDARY, exit 0, with the per-pixel evidence printed. Any flip that
-    is *not* a proven boundary case — or any difference in an integer stage —
-    is DIVERGED, exit 1.
+    So the gate does not grant a blanket tolerance. The compared pre-fill mask
+    is post-median, and the 5x5 median moves a flip to neighbouring pixels — so
+    the diagnosis re-thresholds **both** backends' `bg_prob` fields to recover
+    the raw pre-median masks, and every raw flip must be proven individually:
+    the two values must straddle the threshold and differ by less than
+    BOUNDARY_EPS. It then re-runs the median on each raw mask and requires it
+    to reproduce that backend's pre-fill mask exactly, so the post-median
+    differences are fully accounted for by the proven flips. Every flip proven
+    → verdict FLOAT-BOUNDARY, exit 0, with the per-pixel evidence printed. Any
+    flip that is *not* a proven boundary case — or any difference in an
+    integer stage — is DIVERGED, exit 1.
     """
     BOUNDARY_EPS = 1e-4          # |bg_prob_a - bg_prob_b| at a flipped pixel
 
@@ -270,14 +275,30 @@ def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
 
         if dp:
             ba, bb = st_a["bg"](), st_b["bg"]()
-            for y, x in np.argwhere(pa != pb):
+            ta, tb = threshold_bg_prob(ba), threshold_bg_prob(bb)
+            for y, x in np.argwhere(ta != tb):
                 va, vb = float(ba[y, x]), float(bb[y, x])
                 proven = (abs(va - vb) < BOUNDARY_EPS and
                           (va - thr) * (vb - thr) <= 0)
                 flips.append((i, int(y), int(x), va, vb, proven))
+            # the raw flips must fully explain the post-median difference:
+            # each backend's own 5x5 median over its raw mask has to
+            # reproduce its pre-fill mask bit for bit
+            if ((ta == tb).all()
+                    or (cv2.medianBlur(ta, 5) != np.asarray(pa)).any()
+                    or (cv2.medianBlur(tb, 5) != np.asarray(pb)).any()):
+                integer_stage_bug = True
         if (dr and not dp) or (dc and not dr):
             # a difference appearing in an integer stage with identical input
             integer_stage_bug = True
+        if dc:
+            # zero tolerance on the composite even when the masks legitimately
+            # differ: each backend's composite must equal the host blur over
+            # its own refined mask (the Q8 blur is pinned bit-exact to cv2)
+            for comp, ref in ((ca, ra), (cb, rb)):
+                if (np.asarray(comp) != background_blur(
+                        bgr, np.asarray(ref), BLUR_KSIZE, BLUR_SIGMA)).any():
+                    integer_stage_bug = True
 
     px = scored * h * w
     print(f"\nparity {model_name} vs {ref_name}, {colorspace}, shipping mask "
