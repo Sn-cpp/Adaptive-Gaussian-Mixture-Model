@@ -25,7 +25,9 @@ OUT = os.path.join(os.path.dirname(REPO), "figs")
 sys.path.insert(0, REPO)
 os.makedirs(OUT, exist_ok=True)
 
-BLUE, RED, GREY = "#3a7ca5", "#c0392b", "#95a5a6"
+# Palette validated for colour-vision safety (dataviz six-checks): the old
+# grey/blue failed the chroma floor. Fixed identity: v0 blue, v1 amber, v2 red.
+BLUE, RED, GREY = "#2a78d6", "#c0392b", "#eda100"  # GREY slot now amber (v1)
 SIZES = ["480p", "720p", "1080p"]
 
 plt.rcParams.update({
@@ -65,7 +67,7 @@ def fig_speedup():
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 3.6))
     x = np.arange(3)
     w = 0.26
-    for i, (k, c) in enumerate((("v0", GREY), ("v1", BLUE), ("v2", RED))):
+    for i, (k, c) in enumerate((("v0", BLUE), ("v1", GREY), ("v2", RED))):
         b = a1.bar(x + (i - 1) * w, MS[k], w, label=k, color=c)
         _label(a1, b)
     a1.set_xticks(x); a1.set_xticklabels(SIZES)
@@ -73,7 +75,7 @@ def fig_speedup():
     a1.set_title("Time per frame (lower is better)", fontweight="bold", fontsize=10)
     a1.legend(frameon=False, fontsize=9)
 
-    for i, (k, c) in enumerate((("v0", GREY), ("v1", BLUE), ("v2", RED))):
+    for i, (k, c) in enumerate((("v0", BLUE), ("v1", GREY), ("v2", RED))):
         b = a2.bar(x + (i - 1) * w, FPS[k], w, label=k, color=c)
         _label(a2, b, "{:.0f}")
     a2.axhline(30, color="black", lw=1, ls=":")
@@ -140,7 +142,7 @@ def fig_bus():
     gpu = [3.28, 7.37, 16.59]
     fig, ax = plt.subplots(figsize=(6.4, 3.4))
     x = np.arange(3)
-    b1 = ax.bar(x - 0.19, v0, 0.38, label="v0", color=GREY)
+    b1 = ax.bar(x - 0.19, v0, 0.38, label="v0", color=BLUE)
     b2 = ax.bar(x + 0.19, gpu, 0.38, label="v1 / v2", color=RED)
     _label(ax, b1); _label(ax, b2)
     ax.set_xticks(x); ax.set_xticklabels(SIZES)
