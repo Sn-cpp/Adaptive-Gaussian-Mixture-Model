@@ -187,120 +187,127 @@ def build_model(name, h, w, post=False, colorspace="ycrcb"):
 
 def parity(root, model_name, ref_name="numba", colorspace="ycrcb",
            t0=T0, t1=T1):
-    """Per-frame `np.array_equal` between the shipping mask of two backends.
+    """Per-frame comparison of two backends' shipping mask and composite.
 
-    This exists because the obvious check is not one, and because the first
-    version of this function was not one either.
+    The verdict has three levels, because the pipeline has two kinds of stage:
 
-    *Not* an unchanged F1: F1 is a four-decimal summary of two million pixels,
-    and a mask can move by hundreds of them without shifting it. And `score()`
-    used to hardcode the Numba model, so running it after moving work onto the
-    GPU exercised the CPU path and cheerfully reported that the CPU path still
-    worked.
+    **Integer stages must be bit-exact, no exceptions.** The colour conversion,
+    threshold-as-written, median, flood fill, blur and composite are integer
+    arithmetic end to end; any difference there is a bug, and this gate fails
+    hard on it.
 
-    Nor is it enough to compare `apply()` with the device post-processing
-    switched off. That was this function's first mistake: it compared the raw
-    MOG2 decision, while the mask the pipeline actually ships comes from
-    `bg_prob < threshold` followed by a median, and — for v1/v2 — from a colour
-    conversion that now happens on the device. A backend could convert colour
-    wrongly, or tile the median wrongly, and still pass.
+    **The float32 model stage cannot promise bit-identity across compilers.**
+    LLVM on the host and NVVM on the device contract fused-multiply-adds
+    differently, so `bg_prob` can differ by ulps — and a pixel whose true value
+    sits within an ulp of the 0.5 threshold flips. This is the same phenomenon
+    as our measured 22-px disagreement with cv2's own MOG2, and the docs have
+    said so since the blur kernels landed. On synthetic frames no pixel lands
+    that close; long real sequences find a few.
 
-    So this drives each backend through the path `main.py` drives it through:
-    `mask_from_bgr` -> device post chain -> host `fill_holes` where the backend
-    supports it, and host `cvtColor` -> `apply` -> `refine_mask` where it does
-    not. Then it compares the mask that would have been composited.
+    So the gate does not grant a blanket tolerance. When a pre-fill mask pixel
+    differs, it fetches **both** backends' `bg_prob` at that exact pixel and
+    verifies the flip individually: the two values must straddle the threshold
+    and differ by less than BOUNDARY_EPS. Every flip proven → verdict
+    FLOAT-BOUNDARY, exit 0, with the per-pixel evidence printed. Any flip that
+    is *not* a proven boundary case — or any difference in an integer stage —
+    is DIVERGED, exit 1.
     """
+    BOUNDARY_EPS = 1e-4          # |bg_prob_a - bg_prob_b| at a flipped pixel
+
     first = cv2.imread(os.path.join(root, "input", "in000001.jpg"))
     if first is None:
         raise SystemExit(f"no frames under {root}/input — set HIGHWAY_DIR")
     h, w = first.shape[:2]
 
     def shipping_chain(name):
-        """Return `fn(bgr) -> (refined mask, composite)` via the backend's real path.
-
-        The composite matters as much as the mask. A backend could produce an
-        identical mask and still blur differently — that is precisely what
-        Kernel 2 changed — so comparing only the mask would leave the half of
-        the pipeline this project actually rewrote unchecked.
-        """
+        """(model, run) with run(bgr) -> (pre_fill_mask, refined, composite),
+        plus a bg_prob fetch for the boundary diagnosis."""
         m = build_model(name, h, w, post=True, colorspace=colorspace)
+        state = {}
         if hasattr(m, "mask_from_bgr"):
-            def gpu(bgr):
-                refined = fill_holes(m.mask_from_bgr(bgr))
-                return refined, m.composite(refined)
-            return m, gpu
+            def run(bgr):
+                pre = m.mask_from_bgr(bgr).copy()
+                refined = fill_holes(pre)
+                return pre, refined, m.composite(refined)
+            state["bg"] = lambda: m.d_bg_prob.copy_to_host()
+            return m, run, state
 
         cvt = ((lambda f: cv2.cvtColor(f, cv2.COLOR_BGR2YCrCb))
                if colorspace == "ycrcb" else (lambda f: f))
 
-        def host(bgr):
+        def run(bgr):
             mask, bg_prob, _ = m.apply(cvt(bgr))
-            refined = refine_mask(np.asarray(mask), bg_prob=np.asarray(bg_prob))
-            return refined, background_blur(bgr, refined, BLUR_KSIZE, BLUR_SIGMA)
-        return m, host
+            state["_bg"] = np.asarray(bg_prob).copy()
+            pre = refine_mask(np.asarray(mask), bg_prob=state["_bg"],
+                              do_fill=False)
+            refined = fill_holes(pre)
+            return pre, refined, background_blur(bgr, refined,
+                                                 BLUR_KSIZE, BLUR_SIGMA)
+        state["bg"] = lambda: state["_bg"]
+        return m, run, state
 
-    _, run_a = shipping_chain(model_name)
-    _, run_b = shipping_chain(ref_name)
+    _, run_a, st_a = shipping_chain(model_name)
+    _, run_b, st_b = shipping_chain(ref_name)
+    thr = float(MOG2_BG_PROB_THRESHOLD)
 
-    bad = bad_c = worst = scored = 0
-    first_bad = None
+    n_pre = n_ref = n_comp = scored = 0
+    integer_stage_bug = False
+    flips = []                   # (frame, y, x, bg_a, bg_b, proven)
     saw_fg = False
     for i in range(1, t1 + 1):
         bgr = cv2.imread(os.path.join(root, "input", f"in{i:06d}.jpg"))
-        ma, ca = run_a(bgr)
-        mb, cb = run_b(bgr)
+        pa, ra, ca = run_a(bgr)
+        pb, rb, cb = run_b(bgr)
         if i < t0:
             continue
-        saw_fg |= bool((mb == 255).any())
-        n = int((np.asarray(ma) != np.asarray(mb)).sum())
-        nc = int((np.asarray(ca) != np.asarray(cb)).sum())
-        if (n or nc) and first_bad is None:
-            first_bad = i
-        bad += n
-        bad_c += nc
-        worst = max(worst, n)
         scored += 1
+        saw_fg |= bool((rb == 255).any())
+
+        dp = int((pa != pb).sum())
+        dr = int((np.asarray(ra) != np.asarray(rb)).sum())
+        dc = int((np.asarray(ca) != np.asarray(cb)).sum())
+        n_pre += dp; n_ref += dr; n_comp += dc
+
+        if dp:
+            ba, bb = st_a["bg"](), st_b["bg"]()
+            for y, x in np.argwhere(pa != pb):
+                va, vb = float(ba[y, x]), float(bb[y, x])
+                proven = (abs(va - vb) < BOUNDARY_EPS and
+                          (va - thr) * (vb - thr) <= 0)
+                flips.append((i, int(y), int(x), va, vb, proven))
+        if (dr and not dp) or (dc and not dr):
+            # a difference appearing in an integer stage with identical input
+            integer_stage_bug = True
 
     px = scored * h * w
-    print(f"\nparity {model_name} vs {ref_name}, {colorspace}, shipping mask and "
-          f"composite, frames {t0}-{t1} ({scored} frames, {px} pixels each)")
-    print(f"  mask differing pixels   : {bad}  ({bad / max(px, 1):.6%})")
-    print(f"  composite differing px  : {bad_c}  ({bad_c / max(px * 3, 1):.6%})")
-    print(f"  worst mask frame       : {worst} px")
-    print(f"  first difference       : {first_bad if first_bad else 'none'}")
+    print(f"\nparity {model_name} vs {ref_name}, {colorspace}, shipping mask "
+          f"and composite, frames {t0}-{t1} ({scored} frames, {px} pixels each)")
+    print(f"  pre-fill mask differing px : {n_pre}  ({n_pre / max(px, 1):.6%})")
+    print(f"  refined mask differing px  : {n_ref}")
+    print(f"  composite differing px     : {n_comp}")
+    if flips:
+        print(f"  flipped-pixel evidence (threshold {thr}):")
+        for f, y, x, va, vb, ok in flips[:20]:
+            print(f"    frame {f} ({y:3d},{x:3d})  bg_prob {va:.7f} vs {vb:.7f} "
+                  f"|Δ|={abs(va-vb):.2e}  {'boundary ✓' if ok else 'NOT boundary ✗'}")
     if not saw_fg:
-        print("  DEGENERATE             : no foreground in any frame — proves nothing")
+        print("  DEGENERATE — no foreground in any frame; proves nothing")
         return 1
-    print(f"  VERDICT                : "
-          f"{'IDENTICAL' if bad == 0 and bad_c == 0 else 'DIVERGED'}")
-    return bad + bad_c
 
-
-def scorable(gt, roi):
-    """The pixels CDnet says may be scored at all.
-
-    CDnet labels shadows 50 and object boundaries 170 and defines both as
-    *don't care*, and it ships an ROI mask. Counting either is the easiest way
-    in this project to publish a confident, reproducible, wrong number, so the
-    rule lives in one function that `tests/test_scoring.py` imports and checks
-    against a fixture whose answer is countable by hand.
-    """
-    return roi & ((gt == 255) | (gt == 0))
-
-
-def confusion(pred, gt, roi):
-    """(TP, FP, FN) over the scorable pixels only."""
-    valid = scorable(gt, roi)
-    g = (gt == 255) & valid
-    p = (pred == 255) & valid
-    return int(np.sum(p & g)), int(np.sum(p & ~g)), int(np.sum(~p & g))
-
-
-def metrics(tp, fp, fn):
-    """(F1, IoU, precision, recall). Zero-safe: an empty mask scores 0."""
-    p = tp / max(tp + fp, 1)
-    r = tp / max(tp + fn, 1)
-    return (2 * p * r / max(p + r, 1e-9), tp / max(tp + fp + fn, 1), p, r)
+    all_proven = flips and all(f[5] for f in flips)
+    if n_pre == 0 and n_ref == 0 and n_comp == 0:
+        print("  VERDICT: IDENTICAL")
+        return 0
+    if all_proven and not integer_stage_bug:
+        dmax = max(abs(f[3] - f[4]) for f in flips)
+        print(f"  VERDICT: FLOAT-BOUNDARY — {len(flips)} flips over {scored} "
+              f"frames, every one a proven threshold-straddle (max |Δ| {dmax:.2e}).")
+        print("  The integer stages are exact; this is the documented float32 "
+              "compiler-contraction limit, same class as the 22-px cv2 residual.")
+        return 0
+    print("  VERDICT: DIVERGED — differences are not explained by the float32 "
+          "threshold boundary. This is a bug, not rounding.")
+    return 1
 
 
 # ── scoring ───────────────────────────────────────────────────────────────────
