@@ -1,0 +1,18 @@
+Captured from the team's Google Colab T4 run on 2026-08-20.
+Hardware: Tesla T4, 15360 MiB, NVIDIA driver 580.82.07
+Command: python eval_highway.py --model cuda_v2 --parity-vs numba --colorspace ycrcb
+Window: CDnet highway frames 470-1700 (1231 frames)
+
+This output came from the original strict gate. Its non-zero exit status stopped the
+runner, which is why the later benchmark cells did not execute. It is preserved here
+as evidence; the boundary-aware gate introduced in commit 8a4e159 still needs a T4
+rerun before the cause of both pixels is classified as proven.
+
+=== parity cuda_v2 vs numba, real CDnet frames ===
+
+parity cuda_v2 vs numba, ycrcb, shipping mask and composite, frames 470-1700
+  mask differing pixels   : 2  (0.000002%)
+  composite differing px  : 6  (0.000002%)
+  worst mask frame        : 1 px
+  first difference        : 1374
+  VERDICT                  : DIVERGED

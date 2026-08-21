@@ -318,9 +318,11 @@ first measured at `b2523ba`, as expected since the host chain never changed. So 
 chains quoted in the report (BGR 0.8272; CLOSE precision 0.9634; contour 0.5541). Raw output:
 `benchmarks/records/eval_highway_full.txt`.
 
-Still open on this axis: the GPU-backend parity sweep over the real 1231 frames
-(`eval_highway.py --model cuda_v2 --parity-vs numba`) needs a GPU session with the dataset
-present.
+The first GPU-backend parity sweep over the real 1231 frames
+(`eval_highway.py --model cuda_v2 --parity-vs numba`) observed 2 differing mask pixels
+out of 94,540,800 and stopped under the original strict gate. The exact captured output
+is committed at `benchmarks/records/parity_cuda_v2_vs_numba_t4.txt`. A T4 rerun with the
+boundary-aware gate from `8a4e159` is still required before classifying those two pixels.
 
 **The 81.8%-on-host profile** quoted in the notebook is a one-off from earlier in the project,
 kept because it is what motivated v1. §4 is the version this repository reproduces.
