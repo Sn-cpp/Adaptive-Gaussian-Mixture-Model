@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 
 from gmm_mask import (GMM_Mask_CPU, GMM_Mask_CUDA, GMM_Mask_CUDA_v1,
-                      GMM_Mask_CUDA_v2, GMM_Mask_CuPy, GMM_Mask_Numba)
+                      GMM_Mask_CUDA_v2, GMM_Mask_Numba)
 from settings import (MOG2_BACKGROUND_RATIO, MOG2_BG_PROB_THRESHOLD,
                       MOG2_VAR_THRESHOLD, MOG2_VAR_THRESHOLD_GEN)
 from settings import BLUR_KSIZE, BLUR_SIGMA
@@ -164,7 +164,6 @@ MODELS = {
     "cuda": GMM_Mask_CUDA,
     "cuda_v1": GMM_Mask_CUDA_v1,
     "cuda_v2": GMM_Mask_CUDA_v2,
-    "cupy": GMM_Mask_CuPy,
 }
 
 

@@ -374,54 +374,6 @@ def test_gpu_background_image_syncs_device_state_first(name):
     assert bg.mean() < 150
 
 
-def cupy_available():
-    try:
-        from gmm_mask import GMM_Mask_CuPy
-        if GMM_Mask_CuPy is None:
-            return False
-        import cupy as cp
-        return cp.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
-
-
-@pytest.mark.skipif(not cupy_available(), reason="cupy or a CUDA device is unavailable")
-def test_cupy_matches_the_cpu_reference_including_the_prune():
-    """The backend that was silently a different algorithm.
-
-    `step_kernel_cp_v1.cu` had Zivkovic's complexity-reduction step commented
-    out — the component prune and the `nmodes` decrement both. So CuPy kept
-    components the other three backends delete, and nothing noticed, because
-    no test compared it at all.
-
-    Restoring it is not enough; the test has to *reach* the branch. The first
-    version of this test used `traffic()`, where no pixel's mode count ever
-    decreases, so it would have passed against the broken kernel too. The
-    assertion below on `drops` is the guard against that regression in the
-    test itself.
-    """
-    from gmm_mask import GMM_Mask_CuPy
-
-    frames = transient()
-    ref, m_ref, drops = run_and_watch_pruning(GMM_Mask_Numba, frames)
-    assert drops > 0, (
-        "the fixture never pruned a component — this test cannot distinguish "
-        "a correct kernel from one with the prune commented out")
-
-    cp_model, m_cp, cp_drops = run_and_watch_pruning(GMM_Mask_CuPy, frames)
-
-    assert_some_frame_has_foreground(m_ref, "CuPy fixture")
-    assert_all_frames_equal(m_ref, m_cp, "Numba vs CuPy")
-    assert cp_drops == drops, (
-        f"CuPy pruned {cp_drops} components where the reference pruned "
-        f"{drops} — the complexity-reduction rule differs")
-    for field in ("weights", "means", "vars"):
-        a, b = getattr(ref, field), getattr(cp_model, field)
-        assert np.allclose(a, b, atol=1e-5), (
-            f"CuPy: {field} drifted (max |delta| {np.abs(a - b).max():.3g})")
-    assert np.array_equal(ref.modes, cp_model.modes)
-
-
 @requires_gpu
 @pytest.mark.parametrize("name", ["cuda", "cuda_v1", "cuda_v2"])
 def test_cuda_backends_agree_on_the_prune_branch_too(name):

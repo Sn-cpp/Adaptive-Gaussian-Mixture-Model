@@ -136,7 +136,7 @@ display / write
 - **Development:** MacBook (Apple Silicon) — sequential and Numba baselines, CUDASIM correctness runs
 - **GPU:** Google Colab, NVIDIA T4 (16 GB, 2560 CUDA cores, 320 GB/s)
 
-**Software:** Python 3.12, Numba (<0.62, so that `numba.cuda` still resolves against Colab's `numba-cuda`), NumPy, OpenCV, CuPy for the RawKernel backend, pytest.
+**Software:** Python 3.12, Numba (<0.62, so that `numba.cuda` still resolves against Colab's `numba-cuda`), NumPy, OpenCV, pytest.
 
 **Starting point:** from scratch. No codebase forked; the implementation follows Zivkovic (2004) and is checked against OpenCV's `BackgroundSubtractorMOG2` for bit-level agreement.
 

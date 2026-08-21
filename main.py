@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from gmm_mask import (GMM_Mask_CPU, GMM_Mask_CUDA, GMM_Mask_CUDA_v1,
-                      GMM_Mask_CUDA_v2, GMM_Mask_CuPy, GMM_Mask_Numba)
+                      GMM_Mask_CUDA_v2, GMM_Mask_Numba)
 from settings import BLUR_KSIZE, BLUR_SIGMA
 from utils.post_processing import background_blur, fill_holes, refine_mask
 
@@ -32,7 +32,6 @@ MODELS = {
     "cuda": GMM_Mask_CUDA,
     "cuda_v1": GMM_Mask_CUDA_v1,
     "cuda_v2": GMM_Mask_CUDA_v2,
-    "cupy": GMM_Mask_CuPy,
 }
 
 
@@ -55,7 +54,7 @@ def main():
     if cls is None:
         raise SystemExit(
             f"--model {args.model} is unavailable: its GPU dependency "
-            "(cupy or numba.cuda) is not installed on this machine.")
+            "(numba.cuda) is not installed on this machine.")
 
     src = 0 if args.input_path == "0" else args.input_path
     cap = cv2.VideoCapture(src)

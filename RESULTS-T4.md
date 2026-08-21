@@ -47,6 +47,8 @@ means and variances within 1.6e-5.
 
 **66 / 66 tests pass**, CuPy included.
 
+*(2026-08-21: the CuPy backend and its test were removed from the repo — the team ships the numba.cuda versions only. The record above describes the tree at `a6c0285` and stays as measured.)*
+
 ---
 
 ## 2. Correctness

@@ -25,10 +25,8 @@ python main.py --input_path LTSSUD-Test.mp4 --model numba
 python main.py --input_path LTSSUD-Test.mp4 --model cuda_v2 --no-display
 ```
 
-`--model` is one of `cpu numba cuda cuda_v1 cuda_v2 cupy`. The GPU backends
-fall back to `None` and say so when no device is present. `cupy` additionally
-needs `pip install cupy-cuda12x` (not in `requirements.txt`, since it is
-platform-specific) and is the least exercised backend — see `tests/test_parity.py`.
+`--model` is one of `cpu numba cuda cuda_v1 cuda_v2`. The GPU backends
+fall back to `None` and say so when no device is present.
 
 ## Layout
 
