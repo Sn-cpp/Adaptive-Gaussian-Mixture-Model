@@ -71,9 +71,22 @@
 \end{itemize}
 \end{frame}
 
+\begin{frame}{Giai đoạn nào chạy ở đâu}
+\centering
+\includegraphics[width=.95\textwidth]{fig/fig02.png}
+\begin{itemize}
+  \item v1 chuyển gần hết pipeline sang GPU; v2 gộp kernel và tile hóa; flood fill ở lại CPU trong mọi bản
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Hai kỹ thuật đặc trưng của v2}
+\centering
+\includegraphics[width=.95\textwidth]{fig/fig03.png}
+\end{frame}
+
 \begin{frame}{v1 cắt lưu lượng bus còn một nửa}
 \centering
-\includegraphics[width=.72\textwidth]{fig/fig02.png}
+\includegraphics[width=.72\textwidth]{fig/fig04.png}
 \begin{itemize}
   \item 1080p: \kq{35.25 $\rightarrow$ 16.59 MB/frame} - lợi ích lớn nhất của v1 là \emph{di chuyển ít dữ liệu hơn}
 \end{itemize}
@@ -81,7 +94,7 @@
 
 \begin{frame}{Phát hiện bất ngờ: blur của OpenCV là toán số nguyên}
 \centering
-\includegraphics[width=.8\textwidth]{fig/fig03.png}
+\includegraphics[width=.8\textwidth]{fig/fig05.png}
 \begin{itemize}
   \item Làm tròn từng hệ số: \kq{15,617 px lệch} cv2 · lượng tử hóa tích lũy Q8 (nhóm tái tạo): \kq{0 px}
   \item Số nguyên $\Rightarrow$ đúng \emph{tuyệt đối} trên mọi compiler - float32 không hứa được điều đó
@@ -90,7 +103,7 @@
 
 \begin{frame}{Giai đoạn giữ trên CPU: flood fill}
 \centering
-\includegraphics[width=.62\textwidth]{fig/fig04.png}
+\includegraphics[width=.62\textwidth]{fig/fig06.png}
 \begin{itemize}
   \item Bản GPU cần \kq{593 vòng dilate toàn frame nối đuôi nhau} ở 1080p - đếm số vòng, không phải thời gian
   \item Biết giai đoạn nào \textbf{không} nên chuyển lên GPU cũng là một kết quả (Partial GPU Principle)
@@ -99,7 +112,7 @@
 
 \begin{frame}{Chọn chuỗi hậu xử lý bằng phép đo}
 \centering
-\includegraphics[width=.8\textwidth]{fig/fig05.png}
+\includegraphics[width=.8\textwidth]{fig/fig07.png}
 \begin{itemize}
   \item Chain của nhóm dẫn đầu: \kq{F1 0.9843}; cùng chain trên BGR chỉ 0.8272 - không gian màu quan trọng nhất
 \end{itemize}
@@ -122,7 +135,7 @@
 
 \begin{frame}{Không trôi khỏi OpenCV theo thời gian}
 \centering
-\includegraphics[width=.8\textwidth]{fig/fig06.png}
+\includegraphics[width=.8\textwidth]{fig/fig08.png}
 \begin{itemize}
   \item Nhảy \kq{3 px đúng một lần} ở frame 11 rồi phẳng suốt 110 frame - lệch không tích lũy
 \end{itemize}
@@ -130,7 +143,7 @@
 
 \begin{frame}{Chất lượng mask trực quan}
 \centering
-\includegraphics[width=.62\textwidth]{fig/fig07.png}
+\includegraphics[width=.62\textwidth]{fig/fig09.png}
 \begin{itemize}
   \item Trắng = khớp nhãn · cam = báo thừa · đỏ = bỏ sót - lỗi chỉ nằm ở \emph{viền xe và bóng}
 \end{itemize}
@@ -138,12 +151,12 @@
 
 \begin{frame}{So trực tiếp với thư viện và nhãn}
 \centering
-\includegraphics[width=.95\textwidth]{fig/fig08.png}
+\includegraphics[width=.95\textwidth]{fig/fig10.png}
 \end{frame}
 
 \begin{frame}{Thông lượng trên frame tổng hợp}
 \centering
-\includegraphics[width=.66\textwidth]{fig/fig09.png}
+\includegraphics[width=.66\textwidth]{fig/fig11.png}
 \begin{itemize}
   \item v2: \kq{88.8 FPS} ở 1080p = 4.89× v0, gấp 2.9 lần mục tiêu · target >20× vs sequential chốt ở \kq{887×}
 \end{itemize}
@@ -151,7 +164,7 @@
 
 \begin{frame}{Cảnh quay thực: đủ 5 bản, một phiên đo}
 \centering
-\includegraphics[width=.78\textwidth]{fig/fig10.png}
+\includegraphics[width=.78\textwidth]{fig/fig12.png}
 \begin{itemize}
   \item v2 giữ \kq{89 FPS} ở 1080p thật; sequential 0.05 FPS - nhanh hơn khoảng \kq{1933×} trên cùng clip
 \end{itemize}
@@ -159,12 +172,12 @@
 
 \begin{frame}{Cùng dữ liệu, trục tuyến tính}
 \centering
-\includegraphics[width=.78\textwidth]{fig/fig11.png}
+\includegraphics[width=.78\textwidth]{fig/fig13.png}
 \end{frame}
 
 \begin{frame}{Lợi thế GPU tăng theo số pixel}
 \centering
-\includegraphics[width=.66\textwidth]{fig/fig12.png}
+\includegraphics[width=.66\textwidth]{fig/fig14.png}
 \begin{itemize}
   \item v2 so với Numba CPU: \kq{4.7× ở 240p $\rightarrow$ 11.8× ở 1080p} - lớn nhất đúng nơi thời gian thực khó nhất
 \end{itemize}
@@ -172,7 +185,7 @@
 
 \begin{frame}{Thời gian mỗi frame nằm ở đâu}
 \centering
-\includegraphics[width=.6\textwidth]{fig/fig13.png}
+\includegraphics[width=.6\textwidth]{fig/fig15.png}
 \begin{itemize}
   \item Model và blur giảm mạnh; host flood fill đứng yên $\rightarrow$ \kq{39.7\%} frame của v2 - bước tiếp theo là CUDA streams
 \end{itemize}
@@ -180,8 +193,8 @@
 
 \begin{frame}{Kết quả đầu cuối}
 \centering
-\includegraphics[width=.95\textwidth]{fig/fig14.png}\\[4pt]
-\includegraphics[width=.95\textwidth]{fig/fig15.png}
+\includegraphics[width=.95\textwidth]{fig/fig16.png}\\[4pt]
+\includegraphics[width=.95\textwidth]{fig/fig17.png}
 \end{frame}
 
 % ============================================================
