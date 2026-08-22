@@ -8,3 +8,9 @@
 *.zip
 highway/
 .pytest_cache/
+slides/*.aux
+slides/*.log
+slides/*.nav
+slides/*.snm
+slides/*.toc
+slides/*.out

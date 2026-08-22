@@ -1,0 +1,235 @@
+% Slide thuyết trình - build: xelatex slides.tex (chạy 2 lần)
+\documentclass[aspectratio=169,11pt]{beamer}
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\setsansfont{Helvetica Neue}
+\usetheme{default}
+\usecolortheme{seahorse}
+\definecolor{accent}{HTML}{C0392B}
+\setbeamercolor{frametitle}{fg=accent}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
+\newcommand{\kq}[1]{\textcolor{accent}{\textbf{#1}}}
+
+\title{Phân đoạn tiền cảnh thời gian thực\\và làm mờ có chọn lọc trên GPU}
+\author{Huỳnh Lê Hải Dương (22127081) \and Nguyễn Đức Tín (22127415)}
+\institute{CSC14116 - Applied Parallel Programming, HCMUS}
+\date{}
+
+\begin{document}
+
+\begin{frame}\titlepage\end{frame}
+
+\begin{frame}{Nội dung}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{Giới thiệu}
+
+\begin{frame}{Bài toán}
+\begin{columns}
+\column{.5\textwidth}
+\begin{itemize}
+  \item \textbf{Input:} video giao thông camera cố định (BGR, 320×240 tới 1920×1080)
+  \item \textbf{Output mỗi frame:} mask nhị phân (255 = xe đang chạy) và frame composite - xe nét, nền mờ
+  \item \textbf{Goal:} thời gian thực $\geq$ 30 FPS ở 1080p; chất lượng chấm trên nhãn tay CDnet \texttt{highway} (frame 470--1700)
+\end{itemize}
+\column{.5\textwidth}
+\includegraphics[width=\textwidth]{fig/fig01.png}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Vì sao dùng GPU}
+\begin{itemize}
+  \item 1080p có \kq{2 073 600 pixel}, mỗi pixel cập nhật mô hình \emph{độc lập} $\Rightarrow$ một frame ánh xạ thẳng thành 2 triệu thread
+  \item Sequential Python: \kq{3 035 ms/frame} ở 480p - còn mục tiêu là 30 FPS
+  \item Nhưng không đưa tất cả lên GPU: một giai đoạn được \emph{giữ lại trên CPU} có chủ đích (phần Phương pháp)
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\section{Phương pháp}
+
+\begin{frame}{Thuật toán MOG2 (Zivkovic 2004)}
+\begin{itemize}
+  \item Mỗi pixel giữ \textbf{5 Gaussian} - 5 ``màu quen thuộc'' của nền, kèm phương sai và trọng số
+  \item \texttt{dist² < Tb·var} (Tb=16): fit lỏng $\rightarrow$ cộng bằng chứng background
+  \item \texttt{dist² < Tg·var} (Tg=9): fit chặt $\rightarrow$ cập nhật mode, tốc độ học $\alpha = 1/250$; không mode nào fit $\rightarrow$ thay mode yếu nhất
+  \item Tổng trọng số tới TB=0.9 tạo thành mô hình nền; foreground khi \texttt{bg\_prob} < 0.5
+  \item Cùng thuật toán, cùng tham số cho \textbf{cả 5 bản cài đặt} $\Rightarrow$ so sánh tốc độ là công bằng
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Thang tối ưu: 5 bản cài đặt}
+\begin{itemize}
+  \item \textbf{Sequential Python} - bản đặc tả dễ đọc \quad·\quad \textbf{Numba CPU} - baseline đã biên dịch
+  \item \textbf{CUDA v0 (L1):} model kernel 1 thread/pixel, block 32×8 khớp warp, state planar coalesced. Mọi thứ khác còn ở host, upload 12 B/px
+  \item \textbf{CUDA v1 (L2 - bộ nhớ):} upload 3 B/px; YCrCb, threshold, median, blur, composite thành kernel; mask ở lại device tới bước fill
+  \item \textbf{CUDA v2 (L3 - compute):} fuse threshold vào model kernel (3 kernel còn 2, trung gian 1 B/px); median + blur trên shared-memory tile
+\end{itemize}
+\end{frame}
+
+\begin{frame}{v1 cắt lưu lượng bus còn một nửa}
+\centering
+\includegraphics[width=.72\textwidth]{fig/fig02.png}
+\begin{itemize}
+  \item 1080p: \kq{35.25 $\rightarrow$ 16.59 MB/frame} - lợi ích lớn nhất của v1 là \emph{di chuyển ít dữ liệu hơn}
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Phát hiện bất ngờ: blur của OpenCV là toán số nguyên}
+\centering
+\includegraphics[width=.8\textwidth]{fig/fig03.png}
+\begin{itemize}
+  \item Làm tròn từng hệ số: \kq{15,617 px lệch} cv2 · lượng tử hóa tích lũy Q8 (nhóm tái tạo): \kq{0 px}
+  \item Số nguyên $\Rightarrow$ đúng \emph{tuyệt đối} trên mọi compiler - float32 không hứa được điều đó
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Giai đoạn giữ trên CPU: flood fill}
+\centering
+\includegraphics[width=.62\textwidth]{fig/fig04.png}
+\begin{itemize}
+  \item Bản GPU cần \kq{593 vòng dilate toàn frame nối đuôi nhau} ở 1080p - đếm số vòng, không phải thời gian
+  \item Biết giai đoạn nào \textbf{không} nên chuyển lên GPU cũng là một kết quả (Partial GPU Principle)
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Chọn chuỗi hậu xử lý bằng phép đo}
+\centering
+\includegraphics[width=.8\textwidth]{fig/fig05.png}
+\begin{itemize}
+  \item Chain của nhóm dẫn đầu: \kq{F1 0.9843}; cùng chain trên BGR chỉ 0.8272 - không gian màu quan trọng nhất
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\section{Đánh giá}
+
+\begin{frame}{Parity: 5 bản cài đặt, một kết quả}
+\begin{itemize}
+  \item Frame tổng hợp: mask khớp \textbf{từng bit} giữa cả 5 bản · \kq{75 test} xanh trên T4
+  \item 1231 frame thật: \kq{2 pixel lệch trên 94.5 triệu} - và gate chứng minh \emph{từng pixel}:
+  \begin{itemize}
+    \item một pixel nằm ngay ngưỡng 0.5 (0.4999971 so với 0.5000015)
+    \item một pixel truy về đúng một phép so sánh bị hai compiler làm tròn lệch \emph{1 ulp}
+  \end{itemize}
+  \item Kết luận: ranh giới số thực float32, \textbf{không phải bug}; mọi giai đoạn số nguyên khớp tuyệt đối
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Không trôi khỏi OpenCV theo thời gian}
+\centering
+\includegraphics[width=.8\textwidth]{fig/fig06.png}
+\begin{itemize}
+  \item Nhảy \kq{3 px đúng một lần} ở frame 11 rồi phẳng suốt 110 frame - lệch không tích lũy
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Chất lượng mask trực quan}
+\centering
+\includegraphics[width=.62\textwidth]{fig/fig07.png}
+\begin{itemize}
+  \item Trắng = khớp nhãn · cam = báo thừa · đỏ = bỏ sót - lỗi chỉ nằm ở \emph{viền xe và bóng}
+\end{itemize}
+\end{frame}
+
+\begin{frame}{So trực tiếp với thư viện và nhãn}
+\centering
+\includegraphics[width=.95\textwidth]{fig/fig08.png}
+\end{frame}
+
+\begin{frame}{Thông lượng trên frame tổng hợp}
+\centering
+\includegraphics[width=.66\textwidth]{fig/fig09.png}
+\begin{itemize}
+  \item v2: \kq{88.8 FPS} ở 1080p = 4.89× v0, gấp 2.9 lần mục tiêu · target >20× vs sequential chốt ở \kq{887×}
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Cảnh quay thực: đủ 5 bản, một phiên đo}
+\centering
+\includegraphics[width=.78\textwidth]{fig/fig10.png}
+\begin{itemize}
+  \item v2 giữ \kq{89 FPS} ở 1080p thật; sequential 0.05 FPS - nhanh hơn khoảng \kq{1933×} trên cùng clip
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Cùng dữ liệu, trục tuyến tính}
+\centering
+\includegraphics[width=.78\textwidth]{fig/fig11.png}
+\end{frame}
+
+\begin{frame}{Lợi thế GPU tăng theo số pixel}
+\centering
+\includegraphics[width=.66\textwidth]{fig/fig12.png}
+\begin{itemize}
+  \item v2 so với Numba CPU: \kq{4.7× ở 240p $\rightarrow$ 11.8× ở 1080p} - lớn nhất đúng nơi thời gian thực khó nhất
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Thời gian mỗi frame nằm ở đâu}
+\centering
+\includegraphics[width=.6\textwidth]{fig/fig13.png}
+\begin{itemize}
+  \item Model và blur giảm mạnh; host flood fill đứng yên $\rightarrow$ \kq{39.7\%} frame của v2 - bước tiếp theo là CUDA streams
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Kết quả đầu cuối}
+\centering
+\includegraphics[width=.95\textwidth]{fig/fig14.png}\\[4pt]
+\includegraphics[width=.95\textwidth]{fig/fig15.png}
+\end{frame}
+
+% ============================================================
+\section{Thảo luận}
+
+\begin{frame}{Sáu dự đoán ghi trước khi đo: 5 sai, 1 đúng}
+\small
+\begin{tabular}{llll}
+Dự đoán & Ghi trước & Đo được & \\
+\hline
+Host blur + composite @1080p & 4--8 ms & 13.7 ms & \kq{Sai} \\
+GPU blur kernels @1080p & 0.2--0.4 ms & 1.55 ms & \kq{Sai} \\
+Tiết kiệm ingest + blur @1080p & 4--8 ms & $\sim$34 ms & \kq{Sai} \\
+Giảm lưu lượng bus & $-$38.5\% & $-$52.9\% & \kq{Sai} \\
+Tiling so với naive & ``xấp xỉ naive'' & \textbf{nhanh hơn 2.36×} & \kq{Sai} \\
+Bottleneck sau thay đổi & host fill & đúng - 39.7\% & \textcolor{green!50!black}{\textbf{Đúng}} \\
+\end{tabular}
+\begin{itemize}
+  \item Giữ nguyên dự đoán sai trong báo cáo: dự đoán ghi \emph{trước}, số đo đến \emph{sau} - phần giá trị là giải thích vì sao lệch
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Bài học}
+\begin{itemize}
+  \item Bottleneck ban đầu ở \textbf{host và di chuyển dữ liệu}, không phải phép tính
+  \item Chọn được \textbf{số nguyên} ở đâu là mua được sự đúng tuyệt đối ở đó (blur Q8)
+  \item Có giai đoạn \textbf{thuộc về CPU} - 593 vòng phụ thuộc không biến mất dù kernel nhanh gấp trăm lần
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\section{Kết luận}
+
+\begin{frame}{Kết luận}
+\begin{itemize}
+  \item Một thuật toán, năm bản cài đặt, mọi khẳng định đều có test
+  \item Chất lượng \kq{F1 0.9843} · tốc độ \kq{88.8 / 89 FPS} 1080p (tổng hợp / thực) - cả hai mục tiêu đề xuất đã chốt
+  \item Sai khác GPU--CPU bị chặn ở \kq{2 pixel đã chứng minh} trên 94.5 triệu
+  \item \textbf{Hạn chế:} mirror dataset, float khác compiler (đã chặn), biến động Colab, không có nhãn 1080p
+  \item \textbf{Hướng tiếp theo:} pinned buffers + CUDA streams (overlap fill với ingest); fused separable blur (trần lợi ích nhỏ, chưa đo nên không claim)
+\end{itemize}
+\end{frame}
+
+\begin{frame}{}
+\centering
+{\LARGE\bfseries Cảm ơn thầy cô và các bạn!}\\[8pt]
+{\large Nhóm sẵn sàng trả lời câu hỏi.}\\[16pt]
+{\color{gray}\small Repo: \texttt{github.com/Sn-cpp/Adaptive-Gaussian-Mixture-Model} - mọi số liệu trace về record đã commit}
+\end{frame}
+
+\end{document}
