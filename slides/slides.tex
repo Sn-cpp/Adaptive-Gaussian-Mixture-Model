@@ -62,6 +62,14 @@
 \end{itemize}
 \end{frame}
 
+\begin{frame}{Chọn pipeline bằng phép đo}
+\centering
+\includegraphics[width=.8\textwidth]{fig/fig02.png}
+\begin{itemize}
+  \item Chain của nhóm dẫn đầu: \kq{F1 0.9843}; cùng chain trên BGR chỉ 0.8272 - không gian màu quan trọng nhất
+\end{itemize}
+\end{frame}
+
 \begin{frame}{Thang tối ưu: 5 bản cài đặt}
 \begin{itemize}
   \item \textbf{Sequential Python} - bản đặc tả dễ đọc \quad·\quad \textbf{Numba CPU} - baseline đã biên dịch
@@ -73,7 +81,7 @@
 
 \begin{frame}{Giai đoạn nào chạy ở đâu}
 \centering
-\includegraphics[width=.95\textwidth]{fig/fig02.png}
+\includegraphics[width=.95\textwidth]{fig/fig03.png}
 \begin{itemize}
   \item v1 chuyển gần hết pipeline sang GPU; v2 gộp kernel và tile hóa; flood fill ở lại CPU trong mọi bản
 \end{itemize}
@@ -81,12 +89,12 @@
 
 \begin{frame}{Hai kỹ thuật đặc trưng của v2}
 \centering
-\includegraphics[width=.95\textwidth]{fig/fig03.png}
+\includegraphics[width=.95\textwidth]{fig/fig04.png}
 \end{frame}
 
 \begin{frame}{v1 cắt lưu lượng bus còn một nửa}
 \centering
-\includegraphics[width=.72\textwidth]{fig/fig04.png}
+\includegraphics[width=.72\textwidth]{fig/fig05.png}
 \begin{itemize}
   \item 1080p: \kq{35.25 $\rightarrow$ 16.59 MB/frame} - lợi ích lớn nhất của v1 là \emph{di chuyển ít dữ liệu hơn}
 \end{itemize}
@@ -94,7 +102,7 @@
 
 \begin{frame}{Phát hiện bất ngờ: blur của OpenCV là toán số nguyên}
 \centering
-\includegraphics[width=.8\textwidth]{fig/fig05.png}
+\includegraphics[width=.8\textwidth]{fig/fig06.png}
 \begin{itemize}
   \item Làm tròn từng hệ số: \kq{15,617 px lệch} cv2 · lượng tử hóa tích lũy Q8 (nhóm tái tạo): \kq{0 px}
   \item Số nguyên $\Rightarrow$ đúng \emph{tuyệt đối} trên mọi compiler - float32 không hứa được điều đó
@@ -103,20 +111,13 @@
 
 \begin{frame}{Giai đoạn giữ trên CPU: flood fill}
 \centering
-\includegraphics[width=.62\textwidth]{fig/fig06.png}
+\includegraphics[width=.62\textwidth]{fig/fig07.png}
 \begin{itemize}
   \item Bản GPU cần \kq{593 vòng dilate toàn frame nối đuôi nhau} ở 1080p - đếm số vòng, không phải thời gian
   \item Biết giai đoạn nào \textbf{không} nên chuyển lên GPU cũng là một kết quả (Partial GPU Principle)
 \end{itemize}
 \end{frame}
 
-\begin{frame}{Chọn chuỗi hậu xử lý bằng phép đo}
-\centering
-\includegraphics[width=.8\textwidth]{fig/fig07.png}
-\begin{itemize}
-  \item Chain của nhóm dẫn đầu: \kq{F1 0.9843}; cùng chain trên BGR chỉ 0.8272 - không gian màu quan trọng nhất
-\end{itemize}
-\end{frame}
 
 % ============================================================
 \section{Đánh giá}
